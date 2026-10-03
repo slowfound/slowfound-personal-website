@@ -1,20 +1,21 @@
 import type { Metadata } from "next"
-import { Geist, Geist_Mono } from "next/font/google"
+import { DM_Sans, Geist_Mono } from "next/font/google"
 
 import "./globals.css"
-import { ThemeProvider } from "@/components/theme-provider"
 import { cn } from "@/lib/utils";
 
-const geist = Geist({subsets:['latin'],variable:'--font-sans'})
+// Stand-in for Anthropic Sans, which is not publicly licensed. globals.css
+// lists "Anthropic Sans" first, so it takes over wherever it is available.
+const fontSans = DM_Sans({subsets:['latin'],variable:'--font-fallback-sans'})
 
 const fontMono = Geist_Mono({
   subsets: ["latin"],
-  variable: "--font-mono",
+  variable: "--font-geist-mono",
 })
 
 export const metadata: Metadata = {
   title: "slowfound",
-  description: "GitHub, YouTube, work and education of slowfound.",
+  description: "GitHub, YouTube and work of slowfound.",
 }
 
 export default function RootLayout({
@@ -25,12 +26,9 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      suppressHydrationWarning
-      className={cn("antialiased", fontMono.variable, "font-sans", geist.variable)}
+      className={cn("antialiased", fontMono.variable, "font-sans", fontSans.variable)}
     >
-      <body>
-        <ThemeProvider>{children}</ThemeProvider>
-      </body>
+      <body>{children}</body>
     </html>
   )
 }

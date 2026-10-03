@@ -71,10 +71,3 @@ export const work = resume.work.map((job) => ({
   href: job.href,
   period: span(job.start, job.end),
 }))
-
-export const education = resume.education.map((school) => ({
-  school: school.school,
-  degree: school.degree,
-  href: school.href,
-  period: span(school.start, school.end),
-}))
