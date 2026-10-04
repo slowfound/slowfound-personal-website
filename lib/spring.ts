@@ -77,6 +77,11 @@ export class Spring {
     return value
   }
 
+  /** True once every impulse has settled and been folded away by `get`. */
+  get idle() {
+    return this.impulses.length === 0
+  }
+
   jump(value: number) {
     this.base = value
     this.target = value

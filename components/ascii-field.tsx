@@ -15,6 +15,8 @@ const NOISE_SCALE = 240
 const PULSE_SPEED = 440
 const PULSE_WIDTH = 80
 const PULSE_LIFE = 6
+/** Rings that can be travelling at once. Each pulse() adds one; none is cut short. */
+const MAX_RINGS = 16
 
 /** One breath, in seconds, and the share of it spent breathing in. */
 const BREATH = 6.5
@@ -25,11 +27,12 @@ const TINT_CHROMA = 0.15
 /** Phones and touch devices get a plain background. Mirrors the classes on the canvas. */
 const MOBILE = "(max-width: 767.98px), (pointer: coarse)"
 
-let pulsedAt = -Infinity
+let pulses: number[] = []
 
 /** Send one ring through the field, e.g. when the card turns a page. */
 function pulse() {
-  pulsedAt = performance.now() / 1000
+  pulses.push(performance.now() / 1000)
+  if (pulses.length > MAX_RINGS) pulses.shift()
 }
 
 function smoothstep(from: number, to: number, value: number) {
@@ -83,8 +86,8 @@ uniform float ratio;
 uniform float time;
 uniform float air;
 uniform float strength;
-/** Radius and gain of the ring sent by pulse(). */
-uniform vec2 ring;
+/** Radius and gain of each ring sent by pulse(). */
+uniform vec2 rings[${MAX_RINGS}];
 uniform vec3 ink;
 uniform vec3 wash[3];
 
@@ -123,8 +126,11 @@ void main() {
   float travel = time * 0.5 - air * 2.0;
   float swell = 0.5 + 0.5 * sin(dist * 0.016 - travel + bend * 5.0);
   float value = swell * swell * swell * (0.25 + 0.5 * thin) * (0.3 + 0.7 * air);
-  float offset = (dist + bend * 140.0 - ring.x) / ${float(PULSE_WIDTH)};
-  value += exp(-0.5 * offset * offset) * ring.y;
+  float reach = dist + bend * 140.0;
+  for (int i = 0; i < ${MAX_RINGS}; i++) {
+    float offset = (reach - rings[i].x) / ${float(PULSE_WIDTH)};
+    value += exp(-0.5 * offset * offset) * rings[i].y;
+  }
 
   float level = min(1.0, value) * envelope * (GLYPHS - 1.0);
   float glyph = floor(level);
@@ -209,7 +215,7 @@ function AsciiField({
       ratio: uniform("ratio"),
       time: uniform("time"),
       air: uniform("air"),
-      ring: uniform("ring"),
+      rings: uniform("rings"),
       ink: uniform("ink"),
       wash: uniform("wash"),
     }
@@ -220,6 +226,7 @@ function AsciiField({
     const mobile = window.matchMedia(MOBILE)
 
     let disposed = false
+    const rings = new Float32Array(MAX_RINGS * 2)
 
     function build() {
       if (disposed || mobile.matches) return
@@ -255,18 +262,21 @@ function AsciiField({
     }
 
     function draw(t: number) {
-      const since = t - pulsedAt
+      pulses = pulses.filter((at) => t - at < PULSE_LIFE)
+      rings.fill(0)
+      pulses.forEach((at, i) => {
+        const since = t - at
+        if (since < 0) return
+        rings[i * 2] = since * PULSE_SPEED
+        rings[i * 2 + 1] = Math.exp(-since * 0.7)
+      })
       const air = breath(t)
       // The whole wash shifts a little with each breath.
       const hue = 40 + air * 45
       const lightness = colorScheme.matches ? 0.8 : 0.55
       gl!.uniform1f(uniforms.time, t)
       gl!.uniform1f(uniforms.air, air)
-      gl!.uniform2f(
-        uniforms.ring,
-        since * PULSE_SPEED,
-        since < PULSE_LIFE ? Math.exp(-since * 0.7) : 0
-      )
+      gl!.uniform2fv(uniforms.rings, rings)
       gl!.uniform3fv(
         uniforms.wash,
         [0, 70, 150].flatMap((shift) => oklch(lightness, TINT_CHROMA, hue - shift))

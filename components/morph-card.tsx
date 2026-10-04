@@ -75,8 +75,20 @@ const TAB_FLARE = 10
 const NUDGE = 7
 
 /** A wheel gesture ends once the wheel has been quiet for this long (ms). */
-const WHEEL_IDLE = 160
-const SWIPE_DISTANCE = 36
+const WHEEL_IDLE = 140
+/**
+ * A trackpad keeps sending inertia long after the fingers lift. A new swipe
+ * shows up inside that tail as the deltas dipping, then climbing again.
+ */
+const WHEEL_DIP = 0.35
+const WHEEL_KICK = 3
+const WHEEL_KICK_MIN = 20
+/** No one swipes twice this fast (ms); anything sooner is the same gesture. */
+const WHEEL_REST = 140
+/** Steps closer together than this (s) skip the staging and turn at once. */
+const HURRY = 0.45
+const HURRY_ENTER_DELAY = 0.05
+const SWIPE_DISTANCE = 28
 const SWIPE_MIN = 14
 /** px/ms. A quick flick counts even when it is short. */
 const SWIPE_VELOCITY = 0.11
@@ -208,6 +220,9 @@ function MorphCard() {
     let geometry = measure()
     placeTabs(geometry)
     let index = 0
+    let shownAt = -Infinity
+    /** Set when something other than a spring changed what should be drawn. */
+    let dirty = true
 
     const width = new Spring(SEED)
     const height = new Spring(SEED)
@@ -222,6 +237,16 @@ function MorphCard() {
     const layers = SCENES.map(() => ({ progress: new Spring(0), direction: 1 }))
     const tabs = SCENES.map(() => ({ active: new Spring(0), enter: new Spring(0) }))
     const nudges = { x: new Spring(0), y: new Spring(0) }
+    const springs = [
+      width,
+      height,
+      radius,
+      accentRoundness,
+      ...Object.values(edges),
+      ...Object.values(nudges),
+      ...layers.map((layer) => layer.progress),
+      ...tabs.flatMap((tab) => [tab.active, tab.enter]),
+    ]
 
     function moveAccent(box: Box, t: number) {
       // Each edge rides its own spring: the edge facing the direction of travel
@@ -244,13 +269,18 @@ function MorphCard() {
 
     /** `direction` is 1 when moving to a later scene, -1 to an earlier one. */
     function show(next: number, t: number, direction: number, first = false) {
-      const morphAt = first ? t : t + EXIT_LEAD
+      // Paging quickly, the card turns at once instead of waiting for the old
+      // content to clear; the springs carry on from wherever they are.
+      const hurried = t - shownAt < HURRY
+      shownAt = t
+      const morphAt = first || hurried ? t : t + EXIT_LEAD
+      const enterAt = morphAt + (hurried ? HURRY_ENTER_DELAY : ENTER_DELAY)
 
       SCENES.forEach((_, i) => {
         const selected = i === next
         if (selected) {
           layers[i].direction = direction
-          layers[i].progress.to(1, morphAt + ENTER_DELAY, ENTER)
+          layers[i].progress.to(1, enterAt, ENTER)
         } else {
           // Old content leaves the way the new content is heading.
           if (layers[i].progress.target > 0) layers[i].direction = -direction
@@ -370,31 +400,55 @@ function MorphCard() {
     tabs.forEach((tab, i) => tab.enter.to(1, start + 0.5 + i * 0.06, motion(ENTER)))
     render(start)
 
+    // At rest there is nothing to draw, so a frame costs one check and the
+    // main thread stays free for the next gesture.
     let frame = requestAnimationFrame(function tick(ms) {
-      render(ms / 1000)
+      if (dirty || springs.some((spring) => !spring.idle)) {
+        dirty = false
+        render(ms / 1000)
+      }
       frame = requestAnimationFrame(tick)
     })
 
     // One wheel gesture is one step, however long it runs: the first event
-    // moves, and everything after it (inertia included) is swallowed until the
-    // wheel falls quiet.
-    let wheelLocked = false
-    let wheelIdle = 0
+    // moves, and everything after it (inertia included) is swallowed. The
+    // gesture is over when the wheel falls quiet, turns around, or picks up
+    // again out of its own inertia, so the next swipe never has to wait.
+    const wheel = { at: -Infinity, steppedAt: -Infinity, sign: 0, peak: 0, low: Infinity }
     function onWheel(event: WheelEvent) {
       if (event.ctrlKey) return
       event.preventDefault()
       const horizontal = Math.abs(event.deltaX) > Math.abs(event.deltaY)
       const delta = horizontal ? event.deltaX : event.deltaY
-      window.clearTimeout(wheelIdle)
-      wheelIdle = window.setTimeout(() => {
-        wheelLocked = false
-      }, WHEEL_IDLE)
-      if (wheelLocked || delta === 0) return
-      wheelLocked = true
-      step(delta > 0 ? 1 : -1, horizontal ? "x" : "y")
+      if (delta === 0) return
+      // Lines and pages to something comparable with pixels.
+      const size = Math.abs(delta) * (event.deltaMode === 0 ? 1 : 40)
+      const sign = Math.sign(delta)
+      const at = event.timeStamp
+
+      const quiet = at - wheel.at > WHEEL_IDLE
+      const rested = at - wheel.steppedAt > WHEEL_REST
+      const turned = sign !== wheel.sign && size >= WHEEL_KICK_MIN
+      const kicked = size > Math.max(wheel.low * WHEEL_KICK, wheel.low + WHEEL_KICK_MIN)
+      wheel.at = at
+
+      if (quiet || (rested && (turned || kicked))) {
+        wheel.steppedAt = at
+        wheel.sign = sign
+        wheel.peak = size
+        wheel.low = Infinity
+        step(sign, horizontal ? "x" : "y")
+        return
+      }
+      // Only once the gesture has clearly died down does its floor count, so
+      // the ramp at the start of a slow swipe is never taken for a second one.
+      wheel.peak = Math.max(wheel.peak, size)
+      if (size < wheel.peak * WHEEL_DIP) wheel.low = Math.min(wheel.low, size)
     }
 
-    let touch: { id: number; x: number; y: number; at: number } | null = null
+    // A touch turns the page the moment it has travelled far enough, without
+    // waiting for the finger to lift. One touch, one step.
+    let touch: { id: number; x: number; y: number; at: number; done: boolean } | null = null
     function onTouchStart(event: TouchEvent) {
       // A second finger cancels the swipe instead of hijacking it.
       const first = event.touches.length === 1 ? event.touches[0] : null
@@ -403,23 +457,33 @@ function MorphCard() {
         x: first.clientX,
         y: first.clientY,
         at: event.timeStamp,
+        done: false,
       }
     }
-    function onTouchEnd(event: TouchEvent) {
+    function swipe(event: TouchEvent, lifted: boolean) {
       const origin = touch
-      const end = [...event.changedTouches].find((t) => t.identifier === origin?.id)
-      if (!origin || !end) return
-      touch = null
-      const dx = end.clientX - origin.x
-      const dy = end.clientY - origin.y
+      const point = [...event.changedTouches].find((t) => t.identifier === origin?.id)
+      if (!origin || !point) return
+      if (lifted) touch = null
+      if (origin.done) return
+      const dx = point.clientX - origin.x
+      const dy = point.clientY - origin.y
       const horizontal = Math.abs(dx) > Math.abs(dy)
       const travel = horizontal ? dx : dy
       const distance = Math.abs(travel)
-      const velocity = distance / Math.max(1, event.timeStamp - origin.at)
-      if (distance < SWIPE_MIN) return
-      if (distance < SWIPE_DISTANCE && velocity < SWIPE_VELOCITY) return
+      if (distance < SWIPE_DISTANCE) {
+        // A quick flick counts even when it is short, but only once it ends.
+        const velocity = distance / Math.max(1, event.timeStamp - origin.at)
+        if (!lifted || distance < SWIPE_MIN || velocity < SWIPE_VELOCITY) return
+      }
+      origin.done = true
       // Swiping left or up pulls the next scene in.
       step(travel < 0 ? 1 : -1, horizontal ? "x" : "y")
+    }
+    const onTouchMove = (event: TouchEvent) => swipe(event, false)
+    const onTouchEnd = (event: TouchEvent) => swipe(event, true)
+    function onTouchCancel() {
+      touch = null
     }
 
     function onKeyDown(event: KeyboardEvent) {
@@ -434,7 +498,9 @@ function MorphCard() {
 
     window.addEventListener("wheel", onWheel, { passive: false })
     window.addEventListener("touchstart", onTouchStart, { passive: true })
+    window.addEventListener("touchmove", onTouchMove, { passive: true })
     window.addEventListener("touchend", onTouchEnd)
+    window.addEventListener("touchcancel", onTouchCancel)
     window.addEventListener("keydown", onKeyDown)
 
     let queued = 0
@@ -444,6 +510,7 @@ function MorphCard() {
         geometry = measure()
         placeTabs(geometry)
         morphTo(geometry[index], now())
+        dirty = true
       })
     }
 
@@ -454,11 +521,12 @@ function MorphCard() {
     return () => {
       cancelAnimationFrame(frame)
       cancelAnimationFrame(queued)
-      window.clearTimeout(wheelIdle)
       resizeObserver.disconnect()
       window.removeEventListener("wheel", onWheel)
       window.removeEventListener("touchstart", onTouchStart)
+      window.removeEventListener("touchmove", onTouchMove)
       window.removeEventListener("touchend", onTouchEnd)
+      window.removeEventListener("touchcancel", onTouchCancel)
       window.removeEventListener("keydown", onKeyDown)
       window.removeEventListener("resize", remeasure)
     }
