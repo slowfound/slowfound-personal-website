@@ -22,6 +22,8 @@ const INHALE = 0.4
 /** How much of each glyph's ink the colour wash replaces. */
 const TINT = 0.6
 const TINT_CHROMA = 0.15
+/** Phones and touch devices get a plain background. Mirrors the classes on the canvas. */
+const MOBILE = "(max-width: 767.98px), (pointer: coarse)"
 
 let pulsedAt = -Infinity
 
@@ -86,6 +88,7 @@ function AsciiField({
 
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)")
     const colorScheme = window.matchMedia("(prefers-color-scheme: dark)")
+    const mobile = window.matchMedia(MOBILE)
     const top = RAMP.length - 1
     let cellWidth = 0
     let cellHeight = 0
@@ -94,7 +97,8 @@ function AsciiField({
     let ratio = 1
 
     function build() {
-      ratio = Math.min(window.devicePixelRatio || 1, 2)
+      if (mobile.matches) return
+      ratio =Math.min(window.devicePixelRatio || 1, 2)
       canvas!.width = Math.round(canvas!.clientWidth * ratio)
       canvas!.height = Math.round(canvas!.clientHeight * ratio)
       cellWidth = Math.ceil(CELL_WIDTH * ratio)
@@ -198,26 +202,33 @@ function AsciiField({
       ctx!.globalCompositeOperation = "source-over"
     }
 
-    build()
-    document.fonts.ready.then(build)
-
+    // On mobile the canvas is hidden in CSS and nothing is built or drawn.
     let frame = 0
-    if (!reducedMotion.matches) {
+    function sync() {
+      cancelAnimationFrame(frame)
+      if (mobile.matches) return
+      build()
+      if (reducedMotion.matches) return
       frame = requestAnimationFrame(function tick(ms) {
         draw(ms / 1000)
         frame = requestAnimationFrame(tick)
       })
     }
 
+    sync()
+    document.fonts.ready.then(build)
+
     const resizeObserver = new ResizeObserver(build)
     resizeObserver.observe(canvas)
     // The glyphs are rasterised in the current ink colour.
     colorScheme.addEventListener("change", build)
+    mobile.addEventListener("change", sync)
 
     return () => {
       cancelAnimationFrame(frame)
       resizeObserver.disconnect()
       colorScheme.removeEventListener("change", build)
+      mobile.removeEventListener("change", sync)
     }
   }, [strength])
 
@@ -225,7 +236,10 @@ function AsciiField({
     <canvas
       ref={ref}
       aria-hidden
-      className={cn("pointer-events-none font-mono", className)}
+      className={cn(
+        "pointer-events-none font-mono max-md:hidden pointer-coarse:hidden",
+        className
+      )}
     />
   )
 }

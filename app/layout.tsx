@@ -15,7 +15,7 @@ const fontMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "slowfound",
-  description: "GitHub, YouTube and work of slowfound.",
+  description: "GitHub, YouTube, work and contact details of slowfound.",
 }
 
 export default function RootLayout({

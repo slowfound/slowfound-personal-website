@@ -1,7 +1,14 @@
 "use client"
 
 import * as React from "react"
-import { BriefcaseBusiness, GitBranch, type LucideIcon, Play } from "lucide-react"
+import {
+  ArrowUpRight,
+  BriefcaseBusiness,
+  GitBranch,
+  type LucideIcon,
+  Mail,
+  Play,
+} from "lucide-react"
 
 import { pulse } from "@/components/ascii-field"
 import {
@@ -11,11 +18,11 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
-import { github, work, youtube } from "@/lib/profile"
+import { contact, github, work, youtube } from "@/lib/profile"
 import { Spring, type SpringConfig } from "@/lib/spring"
 import { cn } from "@/lib/utils"
 
-type LayerId = "github" | "youtube" | "work"
+type LayerId = "github" | "youtube" | "work" | "contact"
 type Axis = "x" | "y"
 
 type Scene = {
@@ -28,9 +35,10 @@ type Scene = {
 }
 
 const SCENES: Scene[] = [
-  { id: "github", label: "GitHub", icon: GitBranch, width: 360 },
-  { id: "youtube", label: "YouTube", icon: Play, width: 344 },
-  { id: "work", label: "Work", icon: BriefcaseBusiness, width: 404 },
+  { id: "github", label: "GitHub", icon: GitBranch, width: 423 },
+  { id: "youtube", label: "YouTube", icon: Play, width: 419 },
+  { id: "work", label: "Work", icon: BriefcaseBusiness, width: 465 },
+  { id: "contact", label: "Contact", icon: Mail, width: 419 },
 ]
 
 const MORPH: SpringConfig = { duration: 0.72, bounce: 0.16 }
@@ -56,6 +64,9 @@ const GUTTER = 32
 const DESKTOP_SCALE = 1.15
 /** How far a resting tab sinks behind the card, and how far the card gives at either end. */
 const TAB_REST = 5
+/** Where a row of tabs starts: past the card's corner, with room for the first tab's flare. */
+const TAB_INSET = RADIUS + 10
+const TAB_GAP = 2
 const NUDGE = 7
 
 /** A wheel gesture ends once the wheel has been quiet for this long (ms). */
@@ -135,7 +146,28 @@ function MorphCard() {
       })
     }
 
+    // Tabs fill the top edge first. Whatever does not fit on the narrowest
+    // scene hangs from the bottom edge instead, as the same folder tab flipped.
+    const tabSides = SCENES.map(() => 1)
+    function placeTabs(scenes: Geometry[]) {
+      const end = Math.min(...scenes.map((g) => g.width)) - TAB_INSET
+      let left = TAB_INSET
+      let side = 1
+      tabEls.forEach((tab, i) => {
+        const tabWidth = tab.offsetWidth
+        if (side === 1 && left > TAB_INSET && left + tabWidth > end) {
+          side = -1
+          left = TAB_INSET
+        }
+        tabSides[i] = side
+        tab.dataset.edge = side === 1 ? "top" : "bottom"
+        tab.style.left = `${left}px`
+        left += tabWidth + TAB_GAP
+      })
+    }
+
     let geometry = measure()
+    placeTabs(geometry)
     let index = 0
 
     const width = new Spring(SEED)
@@ -252,7 +284,7 @@ function MorphCard() {
         const entered = clamp(tabs[i].enter.get(t))
         tab.style.setProperty("--active", `${active}`)
         tab.style.opacity = `${entered}`
-        tab.style.transform = `translateY(${(1 - active) * TAB_REST + (1 - entered) * 8}px)`
+        tab.style.transform = `translateY(${tabSides[i] * ((1 - active) * TAB_REST + (1 - entered) * 8)}px)`
       })
     }
 
@@ -334,12 +366,13 @@ function MorphCard() {
       cancelAnimationFrame(queued)
       queued = requestAnimationFrame(() => {
         geometry = measure()
+        placeTabs(geometry)
         morphTo(geometry[index], now())
       })
     }
 
     const resizeObserver = new ResizeObserver(remeasure)
-    for (const el of layerEls) resizeObserver.observe(el)
+    for (const el of [...layerEls, ...tabEls]) resizeObserver.observe(el)
     window.addEventListener("resize", remeasure)
 
     return () => {
@@ -358,11 +391,7 @@ function MorphCard() {
   return (
     <div ref={rootRef} className="relative shrink-0 will-change-transform">
       {/* Tabs overlap the card by a pixel and sit behind it, so no seam shows. */}
-      <div
-        role="tablist"
-        aria-label="Sections"
-        className="absolute bottom-[calc(100%-1px)] left-[1.875rem] flex items-end gap-0.5"
-      >
+      <div role="tablist" aria-label="Sections" className="absolute inset-0">
         {SCENES.map((scene, i) => (
           <button
             key={scene.id}
@@ -373,13 +402,13 @@ function MorphCard() {
             aria-selected={i === 0}
             tabIndex={i === 0 ? 0 : -1}
             onClick={() => goRef.current?.(i)}
-            className="group/tab relative flex h-8 items-center rounded-t-[10px] bg-(--tab) px-3.5 text-[0.8125rem] font-medium text-card-foreground outline-none select-none [-webkit-tap-highlight-color:transparent] will-change-transform before:absolute before:inset-x-0 before:-top-3 before:bottom-0 focus-visible:ring-2 focus-visible:ring-clay/70"
+            className="group/tab absolute bottom-[calc(100%-1px)] left-[1.875rem] flex h-8 cursor-pointer items-center rounded-t-[10px] bg-(--tab) whitespace-nowrap data-[edge=bottom]:top-[calc(100%-1px)] data-[edge=bottom]:bottom-auto data-[edge=bottom]:rounded-t-none data-[edge=bottom]:rounded-b-[10px] data-[edge=bottom]:[--flare-y:100%] data-[edge=bottom]:before:top-0 data-[edge=bottom]:before:-bottom-3 px-3.5 text-[0.8125rem] font-medium max-sm:px-2.5 max-[359px]:px-1.5 max-[359px]:text-xs text-card-foreground outline-none select-none [-webkit-tap-highlight-color:transparent] will-change-transform before:absolute before:inset-x-0 before:-top-3 before:bottom-0 focus-visible:ring-2 focus-visible:ring-clay/70"
             style={{ opacity: 0, ...TAB_COLOR }}
           >
             <Flare side="left" />
             <Flare side="right" />
             <span className="flex items-center gap-1.5 opacity-55 transition-[opacity,transform] duration-150 ease-out group-active/tab:scale-[0.97] group-aria-selected/tab:opacity-100 [@media(hover:hover)]:group-hover/tab:opacity-100">
-              <scene.icon aria-hidden className="size-3.5 max-[359px]:hidden" strokeWidth={1.75} />
+              <scene.icon aria-hidden className="size-3.5 max-lg:hidden" strokeWidth={1.75} />
               {scene.label}
             </span>
           </button>
@@ -406,7 +435,7 @@ function MorphCard() {
             <ul className="flex flex-col gap-2">
               {github.repos.map((repo) => (
                 <li key={repo.name} className="flex items-baseline justify-between gap-4">
-                  <Link href={repo.href} className="truncate">
+                  <Link href={repo.href}>
                     {repo.name}
                   </Link>
                   <span className="font-mono text-xs text-muted-foreground tabular-nums">
@@ -439,7 +468,7 @@ function MorphCard() {
             <ul className="flex flex-col gap-2">
               {youtube.featured.map((video) => (
                 <li key={video.title} className="flex items-baseline justify-between gap-4">
-                  <Link href={video.href} className="truncate">
+                  <Link href={video.href}>
                     {video.title}
                   </Link>
                   <span className="shrink-0 text-xs text-muted-foreground">{video.meta}</span>
@@ -467,23 +496,41 @@ function MorphCard() {
             />
           </CardContent>
         </Layer>
+
+        <Layer id="contact">
+          <CardHeader>
+            <Label anchorClassName="size-1.5 rounded-[2px]">get in touch</Label>
+          </CardHeader>
+          <CardContent>
+            <ul className="flex flex-col gap-2">
+              {contact.map((item) => (
+                <li key={item.label} className="flex items-baseline justify-between gap-4">
+                  <span className="shrink-0 font-mono text-xs text-muted-foreground">
+                    {item.label}
+                  </span>
+                  <Link href={item.href}>{item.value}</Link>
+                </li>
+              ))}
+            </ul>
+          </CardContent>
+        </Layer>
       </Card>
 
     </div>
   )
 }
 
-/** The concave sweep that lets a folder tab pour into the card's top edge. */
+/** The concave sweep that lets a folder tab pour into the card's edge. */
 function Flare({ side }: { side: "left" | "right" }) {
   return (
     <span
       aria-hidden
       className={cn(
-        "pointer-events-none absolute bottom-0 size-2.5 opacity-(--active)",
+        "pointer-events-none absolute bottom-0 size-2.5 opacity-(--active) group-data-[edge=bottom]/tab:top-0 group-data-[edge=bottom]/tab:bottom-auto",
         side === "left" ? "right-full" : "left-full"
       )}
       style={{
-        background: `radial-gradient(circle at ${side === "left" ? "0 0" : "100% 0"}, transparent 9.5px, var(--tab) 10px)`,
+        background: `radial-gradient(circle at ${side === "left" ? "0" : "100%"} var(--flare-y, 0), transparent 9.5px, var(--tab) 10px)`,
       }}
     />
   )
@@ -557,7 +604,7 @@ function Timeline({
       {items.map((item) => (
         <li key={item.key} className="flex items-baseline justify-between gap-4">
           <div className="flex min-w-0 flex-col gap-0.5">
-            <Link href={item.href} className="font-medium">
+            <Link href={item.href} className="self-start font-medium">
               {item.title}
             </Link>
             <span className="text-muted-foreground">{item.subtitle}</span>
@@ -580,17 +627,25 @@ function Link({
   className?: string
   children: React.ReactNode
 }) {
+  // Always underlined and marked with an arrow, so it reads as a link without
+  // hover, which touch screens do not have.
   return (
     <a
       href={href}
-      target="_blank"
-      rel="noreferrer"
+      {...(href.startsWith("http") && { target: "_blank", rel: "noreferrer" })}
       className={cn(
-        "decoration-foreground/30 underline-offset-4 [@media(hover:hover)]:hover:underline",
+        "group/link inline-flex max-w-full min-w-0 items-baseline gap-1 rounded-sm outline-none transition-opacity duration-150 focus-visible:ring-2 focus-visible:ring-clay/70 active:opacity-60",
         className
       )}
     >
-      {children}
+      <span className="truncate underline decoration-foreground/25 underline-offset-4 transition-colors duration-150 [@media(hover:hover)]:group-hover/link:decoration-clay">
+        {children}
+      </span>
+      <ArrowUpRight
+        aria-hidden
+        className="size-[0.85em] shrink-0 self-center text-muted-foreground transition-[color,translate] duration-150 ease-out [@media(hover:hover)]:group-hover/link:translate-x-px [@media(hover:hover)]:group-hover/link:-translate-y-px [@media(hover:hover)]:group-hover/link:text-clay"
+        strokeWidth={2}
+      />
     </a>
   )
 }

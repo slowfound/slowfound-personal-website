@@ -55,6 +55,19 @@ export const youtube = {
   ],
 }
 
+export const contact = [
+  {
+    label: "email",
+    value: "slowfounded@gmail.com",
+    href: "mailto:slowfounded@gmail.com",
+  },
+  {
+    label: "linkedin",
+    value: "in/slowfound",
+    href: "https://www.linkedin.com/in/slowfound",
+  },
+]
+
 function year(date: string) {
   return date === "Present" ? "Now" : date.slice(-4)
 }
