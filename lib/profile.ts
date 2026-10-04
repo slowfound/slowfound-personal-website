@@ -82,5 +82,6 @@ export const work = resume.work.map((job) => ({
   company: job.company,
   title: job.title,
   href: job.href,
+  logo: job.logoUrl,
   period: span(job.start, job.end),
 }))

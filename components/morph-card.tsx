@@ -1,6 +1,7 @@
 "use client"
 
 import * as React from "react"
+import Image from "next/image"
 import {
   ArrowUpRight,
   BriefcaseBusiness,
@@ -67,6 +68,10 @@ const TAB_REST = 5
 /** Where a row of tabs starts: past the card's corner, with room for the first tab's flare. */
 const TAB_INSET = RADIUS + 10
 const TAB_GAP = 2
+const TAB_HEIGHT = 32
+const TAB_RADIUS = 10
+/** Radius of the concave sweep that pours a selected tab into the card's edge. */
+const TAB_FLARE = 10
 const NUDGE = 7
 
 /** A wheel gesture ends once the wheel has been quiet for this long (ms). */
@@ -87,7 +92,32 @@ const KEYS: Record<string, [direction: number, axis: Axis]> = {
 const TAB_COLOR = {
   "--tab":
     "color-mix(in oklab, var(--card) calc(var(--active, 0) * 100%), var(--tab-rest))",
+  "--tab-edge":
+    "color-mix(in oklab, var(--card-edge) calc(var(--active, 0) * 100%), transparent)",
 } as React.CSSProperties
+
+/**
+ * A top tab's silhouette as one open path: flare, side, corner, top, corner,
+ * side, flare. Drawn in one stroke so the hairline keeps a single weight
+ * through every curve. The card's top edge is y = 0 and `top` is the tab's
+ * upper edge, so a sinking tab shortens while its foot stays on the card.
+ * Everything is inset half a pixel: a 1px stroke then fills whole pixels and
+ * its ends land exactly on the card's own hairline.
+ */
+function tabOutline(width: number, flare: number, top: number) {
+  const s = 0.5
+  const r = TAB_RADIUS - s
+  return [
+    `M${s - flare} ${s}`,
+    `A${flare} ${flare} 0 0 0 ${s} ${s - flare}`,
+    `V${top + TAB_RADIUS}`,
+    `A${r} ${r} 0 0 1 ${TAB_RADIUS} ${top + s}`,
+    `H${width - TAB_RADIUS}`,
+    `A${r} ${r} 0 0 1 ${width - s} ${top + TAB_RADIUS}`,
+    `V${s - flare}`,
+    `A${flare} ${flare} 0 0 0 ${width - s + flare} ${s}`,
+  ].join("")
+}
 
 /** `roundness` is the corner radius as a fraction of half the shorter side. */
 type Box = { l: number; t: number; r: number; b: number; roundness: number }
@@ -96,6 +126,7 @@ type Geometry = { width: number; height: number; accent: Box }
 function MorphCard() {
   const rootRef = React.useRef<HTMLDivElement>(null)
   const cardRef = React.useRef<HTMLDivElement>(null)
+  const shapeRef = React.useRef<SVGSVGElement>(null)
   const accentRef = React.useRef<HTMLDivElement>(null)
   const goRef = React.useRef<(index: number) => void>(null)
 
@@ -103,7 +134,8 @@ function MorphCard() {
     const root = rootRef.current
     const card = cardRef.current
     const accent = accentRef.current
-    if (!root || !card || !accent) return
+    const shape = shapeRef.current
+    if (!root || !card || !accent || !shape) return
 
     const layerEls = SCENES.map(
       (scene) => card.querySelector<HTMLElement>(`[data-layer="${scene.id}"]`)!
@@ -149,6 +181,11 @@ function MorphCard() {
     // Tabs fill the top edge first. Whatever does not fit on the narrowest
     // scene hangs from the bottom edge instead, as the same folder tab flipped.
     const tabSides = SCENES.map(() => 1)
+    const tabWidths = SCENES.map(() => 0)
+    const tabLefts = SCENES.map(() => 0)
+    const tabBacks = [...shape.querySelectorAll<SVGPathElement>("[data-tab-back]")]
+    const tabFronts = [...shape.querySelectorAll<SVGGElement>("[data-tab-front]")]
+    const [cardFill, cardEdge] = shape.querySelectorAll("rect")
     function placeTabs(scenes: Geometry[]) {
       const end = Math.min(...scenes.map((g) => g.width)) - TAB_INSET
       let left = TAB_INSET
@@ -160,6 +197,8 @@ function MorphCard() {
           left = TAB_INSET
         }
         tabSides[i] = side
+        tabWidths[i] = tabWidth
+        tabLefts[i] = left
         tab.dataset.edge = side === 1 ? "top" : "bottom"
         tab.style.left = `${left}px`
         left += tabWidth + TAB_GAP
@@ -247,9 +286,18 @@ function MorphCard() {
     }
 
     function render(t: number) {
-      card!.style.width = `${width.get(t)}px`
-      card!.style.height = `${height.get(t)}px`
-      card!.style.borderRadius = `${Math.max(0, radius.get(t))}px`
+      const cardWidth = Math.max(0, width.get(t))
+      const cardHeight = Math.max(0, height.get(t))
+      const cardRadius = Math.max(0, radius.get(t))
+      card!.style.width = `${cardWidth}px`
+      card!.style.height = `${cardHeight}px`
+      card!.style.borderRadius = `${cardRadius}px`
+      cardFill.setAttribute("width", `${cardWidth}`)
+      cardFill.setAttribute("height", `${cardHeight}`)
+      cardFill.setAttribute("rx", `${cardRadius}`)
+      cardEdge.setAttribute("width", `${Math.max(0, cardWidth - 1)}`)
+      cardEdge.setAttribute("height", `${Math.max(0, cardHeight - 1)}`)
+      cardEdge.setAttribute("rx", `${Math.max(0, cardRadius - 0.5)}`)
       root!.style.transform = `translate(${nudges.x.get(t)}px, ${nudges.y.get(t)}px)`
 
       const left = edges.l.get(t)
@@ -282,9 +330,37 @@ function MorphCard() {
         const tab = tabEls[i]
         const active = clamp(tabs[i].active.get(t))
         const entered = clamp(tabs[i].enter.get(t))
-        tab.style.setProperty("--active", `${active}`)
         tab.style.opacity = `${entered}`
-        tab.style.transform = `translateY(${tabSides[i] * ((1 - active) * TAB_REST + (1 - entered) * 8)}px)`
+        const sunk = (1 - active) * TAB_REST + (1 - entered) * 8
+        tab.style.transform = `translateY(${tabSides[i] * sunk}px)`
+
+        // The flare grows out of the tab as it rises, so a resting tab is a
+        // plain rounded shape and the selected one pours into the card.
+        const outline = tabOutline(tabWidths[i], active * TAB_FLARE, 1 - TAB_HEIGHT + sunk)
+        const foot = `H${0.5 - active * TAB_FLARE}Z`
+        // Bottom tabs are the same shape, flipped onto the card's lower edge.
+        const place =
+          tabSides[i] === 1
+            ? `translate(${tabLefts[i]})`
+            : `translate(${tabLefts[i]} ${cardHeight}) scale(1 -1)`
+
+        // Behind the card, the tab's body runs on underneath it.
+        const back = tabBacks[i]
+        back.setAttribute("d", `${outline}V8${foot}`)
+        back.setAttribute("transform", place)
+        back.style.setProperty("--active", `${active}`)
+        back.style.opacity = `${entered}`
+
+        // In front, the selected tab takes out the card's hairline across its
+        // mouth and reaches over its neighbours.
+        const front = tabFronts[i]
+        const [cover, edge] = front.children
+        cover.setAttribute("d", `${outline}V2${foot}`)
+        cover.setAttribute("opacity", `${active}`)
+        edge.setAttribute("d", outline)
+        front.setAttribute("transform", place)
+        front.style.setProperty("--active", `${active}`)
+        front.style.opacity = `${entered}`
       })
     }
 
@@ -390,7 +466,27 @@ function MorphCard() {
 
   return (
     <div ref={rootRef} className="relative shrink-0 will-change-transform">
-      {/* Tabs overlap the card by a pixel and sit behind it, so no seam shows. */}
+      {/* The card and its tabs are drawn in one coordinate space, so their
+          hairlines meet exactly at any pixel density. Order is depth: resting
+          tabs, the card, then what the selected tab lays over both. */}
+      <svg
+        ref={shapeRef}
+        aria-hidden
+        className="pointer-events-none absolute top-0 left-0 size-px overflow-visible"
+      >
+        {SCENES.map((scene) => (
+          <path key={scene.id} data-tab-back className="fill-(--tab)" style={TAB_COLOR} />
+        ))}
+        <rect className="fill-card" />
+        <rect x={0.5} y={0.5} className="fill-none stroke-(--card-edge)" />
+        {SCENES.map((scene) => (
+          <g key={scene.id} data-tab-front style={TAB_COLOR}>
+            <path className="fill-(--tab)" />
+            <path className="fill-none stroke-(--tab-edge)" />
+          </g>
+        ))}
+      </svg>
+
       <div role="tablist" aria-label="Sections" className="absolute inset-0">
         {SCENES.map((scene, i) => (
           <button
@@ -402,11 +498,9 @@ function MorphCard() {
             aria-selected={i === 0}
             tabIndex={i === 0 ? 0 : -1}
             onClick={() => goRef.current?.(i)}
-            className="group/tab absolute bottom-[calc(100%-1px)] left-[1.875rem] flex h-8 cursor-pointer items-center rounded-t-[10px] bg-(--tab) whitespace-nowrap data-[edge=bottom]:top-[calc(100%-1px)] data-[edge=bottom]:bottom-auto data-[edge=bottom]:rounded-t-none data-[edge=bottom]:rounded-b-[10px] data-[edge=bottom]:[--flare-y:100%] data-[edge=bottom]:before:top-0 data-[edge=bottom]:before:-bottom-3 px-3.5 text-[0.8125rem] font-medium max-sm:px-2.5 max-[359px]:px-1.5 max-[359px]:text-xs text-card-foreground outline-none select-none [-webkit-tap-highlight-color:transparent] will-change-transform before:absolute before:inset-x-0 before:-top-3 before:bottom-0 focus-visible:ring-2 focus-visible:ring-clay/70"
-            style={{ opacity: 0, ...TAB_COLOR }}
+            className="group/tab absolute bottom-[calc(100%-1px)] left-[1.875rem] flex h-8 cursor-pointer items-center rounded-t-[10px] whitespace-nowrap data-[edge=bottom]:top-[calc(100%-1px)] data-[edge=bottom]:bottom-auto data-[edge=bottom]:rounded-t-none data-[edge=bottom]:rounded-b-[10px] data-[edge=bottom]:before:top-0 data-[edge=bottom]:before:-bottom-3 px-3.5 text-[0.8125rem] font-medium max-sm:px-2.5 max-[359px]:px-1.5 max-[359px]:text-xs text-card-foreground outline-none select-none [-webkit-tap-highlight-color:transparent] will-change-transform before:absolute before:inset-x-0 before:-top-3 before:bottom-0 focus-visible:ring-2 focus-visible:ring-clay/70"
+            style={{ opacity: 0 }}
           >
-            <Flare side="left" />
-            <Flare side="right" />
             <span className="flex items-center gap-1.5 opacity-55 transition-[opacity,transform] duration-150 ease-out group-active/tab:scale-[0.97] group-aria-selected/tab:opacity-100 [@media(hover:hover)]:group-hover/tab:opacity-100">
               <scene.icon aria-hidden className="size-3.5 max-lg:hidden" strokeWidth={1.75} />
               {scene.label}
@@ -417,7 +511,7 @@ function MorphCard() {
 
       <Card
         ref={cardRef}
-        className="relative block gap-0 p-0 ring-0! [--card-spacing:--spacing(6)]"
+        className="relative block gap-0 bg-transparent p-0 ring-0! [--card-spacing:--spacing(6)]"
         style={{ width: SEED, height: SEED, borderRadius: SEED / 2 }}
       >
         <div ref={accentRef} aria-hidden className="absolute top-0 left-0 bg-clay" />
@@ -491,6 +585,7 @@ function MorphCard() {
                 title: job.company,
                 subtitle: job.title,
                 href: job.href,
+                logo: job.logo,
                 period: job.period,
               }))}
             />
@@ -517,22 +612,6 @@ function MorphCard() {
       </Card>
 
     </div>
-  )
-}
-
-/** The concave sweep that lets a folder tab pour into the card's edge. */
-function Flare({ side }: { side: "left" | "right" }) {
-  return (
-    <span
-      aria-hidden
-      className={cn(
-        "pointer-events-none absolute bottom-0 size-2.5 opacity-(--active) group-data-[edge=bottom]/tab:top-0 group-data-[edge=bottom]/tab:bottom-auto",
-        side === "left" ? "right-full" : "left-full"
-      )}
-      style={{
-        background: `radial-gradient(circle at ${side === "left" ? "0" : "100%"} var(--flare-y, 0), transparent 9.5px, var(--tab) 10px)`,
-      }}
-    />
   )
 }
 
@@ -597,21 +676,37 @@ function Stats({ items }: { items: { label: string; value: string }[] }) {
 function Timeline({
   items,
 }: {
-  items: { key: string; title: string; subtitle: string; href: string; period: string }[]
+  items: {
+    key: string
+    title: string
+    subtitle: string
+    href: string
+    logo: string
+    period: string
+  }[]
 }) {
   return (
     <ul className="flex flex-col gap-3.5">
       {items.map((item) => (
-        <li key={item.key} className="flex items-baseline justify-between gap-4">
-          <div className="flex min-w-0 flex-col gap-0.5">
-            <Link href={item.href} className="self-start font-medium">
-              {item.title}
-            </Link>
-            <span className="text-muted-foreground">{item.subtitle}</span>
+        <li key={item.key} className="group/item flex items-center gap-3">
+          <Image
+            src={item.logo}
+            alt=""
+            width={36}
+            height={36}
+            className="size-9 shrink-0 rounded-lg bg-white object-cover grayscale transition-[filter] duration-200 ease-out group-focus-within/item:grayscale-0 [@media(hover:hover)]:group-hover/item:grayscale-0"
+          />
+          <div className="flex min-w-0 flex-1 items-baseline justify-between gap-4">
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <Link href={item.href} className="self-start font-medium">
+                {item.title}
+              </Link>
+              <span className="text-muted-foreground">{item.subtitle}</span>
+            </div>
+            <span className="shrink-0 font-mono text-xs text-muted-foreground tabular-nums">
+              {item.period}
+            </span>
           </div>
-          <span className="shrink-0 font-mono text-xs text-muted-foreground tabular-nums">
-            {item.period}
-          </span>
         </li>
       ))}
     </ul>
