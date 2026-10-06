@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Vendored Hairline kernel and figures, plain scripts served as they are.
+    "public/hairline/**",
   ]),
 ]);
 

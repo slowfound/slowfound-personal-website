@@ -3,15 +3,21 @@
 import * as React from "react"
 import Image from "next/image"
 import {
+  ArrowLeft,
+  ArrowRight,
   ArrowUpRight,
+  Boxes,
   BriefcaseBusiness,
+  FolderOpen,
   GitBranch,
   type LucideIcon,
   Mail,
   Play,
 } from "lucide-react"
 
-import { pulse } from "@/components/ascii-field"
+import { type Brand, BrandMark, brandOf } from "@/components/brand-icons"
+import { pulse } from "@/components/dither-field"
+import { HairlineFigure } from "@/components/hairline-figure"
 import {
   Card,
   CardContent,
@@ -19,15 +25,22 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
-import { contact, github, work, youtube } from "@/lib/profile"
+import {
+  contact,
+  github,
+  type Project,
+  projects as published,
+  unpublished,
+  work,
+  youtube,
+} from "@/lib/profile"
 import { Spring, type SpringConfig } from "@/lib/spring"
 import { cn } from "@/lib/utils"
 
-type LayerId = "github" | "youtube" | "work" | "contact"
 type Axis = "x" | "y"
 
-type Scene = {
-  id: LayerId
+type Folder = {
+  id: string
   /** Shown on the folder tab. */
   label: string
   icon: LucideIcon
@@ -35,11 +48,61 @@ type Scene = {
   width: number
 }
 
-const SCENES: Scene[] = [
-  { id: "github", label: "GitHub", icon: GitBranch, width: 423 },
-  { id: "youtube", label: "YouTube", icon: Play, width: 419 },
+const SCENES: Folder[] = [
+  { id: "projects", label: "Projects", icon: Boxes, width: 520 },
+  { id: "github", label: "GitHub", icon: GitBranch, width: 445 },
+  { id: "youtube", label: "YouTube", icon: Play, width: 445 },
   { id: "work", label: "Work", icon: BriefcaseBusiness, width: 465 },
-  { id: "contact", label: "Contact", icon: Mail, width: 419 },
+  { id: "contact", label: "Contact", icon: Mail, width: 445 },
+]
+
+const projects = [...unpublished, ...published]
+
+/**
+ * Every layer the card can become: the scenes, then one folder per project,
+ * which opens from a row inside a scene and sits a level below it.
+ */
+const FOLDERS: Folder[] = [
+  ...SCENES,
+  ...projects.map((project) => ({
+    id: project.id,
+    label: project.label,
+    icon: FolderOpen,
+    width: 465,
+  })),
+]
+
+const ROOT = "root"
+/** A tab that leads back to whichever scene the open project was opened from. */
+const BACK = -1
+
+/** Each layer shows one set of tabs: the scenes, or one project beside the way back. */
+function setOf(layer: number) {
+  return layer < SCENES.length ? ROOT : FOLDERS[layer].id
+}
+
+function layerOf(projectId: string) {
+  return FOLDERS.findIndex((folder) => folder.id === projectId)
+}
+
+type Tab = { set: string; layer: number; label: string; icon: LucideIcon }
+
+const TABS: Tab[] = [
+  ...SCENES.map((scene, i) => ({ set: ROOT, layer: i, label: scene.label, icon: scene.icon })),
+  ...projects.flatMap((project) => [
+    {
+      set: project.id,
+      layer: BACK,
+      // Rewritten on open to name the scene it was opened from.
+      label: unpublished.includes(project)
+        ? "Projects"
+        : github.repos.some((repo) => repo.project === project.id)
+          ? "GitHub"
+          : "YouTube",
+      icon: ArrowLeft,
+    },
+    { set: project.id, layer: layerOf(project.id), label: project.label, icon: FolderOpen },
+  ]),
 ]
 
 const MORPH: SpringConfig = { duration: 0.72, bounce: 0.16 }
@@ -59,7 +122,7 @@ const BLUR = 6
 const SHIFT = 5
 const SEED = 56
 /** One corner radius for every scene. */
-const RADIUS = 20
+const RADIUS = 14
 const GUTTER = 32
 /** On desktop the card body is wider to leave room for content; type stays the same size. */
 const DESKTOP_SCALE = 1.15
@@ -73,6 +136,11 @@ const TAB_RADIUS = 10
 /** Radius of the concave sweep that pours a selected tab into the card's edge. */
 const TAB_FLARE = 10
 const NUDGE = 7
+/** Registration marks: how far out from each corner they sit, and how long their arms are. */
+const CROP_GAP = 6
+const CROP_ARM = 7
+/** The marks follow the card on a slower spring, so they lose register while it moves. */
+const CROP: SpringConfig = { duration: 1.05, bounce: 0.12 }
 
 /** A wheel gesture ends once the wheel has been quiet for this long (ms). */
 const WHEEL_IDLE = 140
@@ -149,10 +217,10 @@ function MorphCard() {
     const shape = shapeRef.current
     if (!root || !card || !accent || !shape) return
 
-    const layerEls = SCENES.map(
-      (scene) => card.querySelector<HTMLElement>(`[data-layer="${scene.id}"]`)!
+    const layerEls = FOLDERS.map(
+      (folder) => card.querySelector<HTMLElement>(`[data-layer="${folder.id}"]`)!
     )
-    const tabEls = [...root.querySelectorAll<HTMLElement>("[role=tab]")]
+    const tabEls = [...root.querySelectorAll<HTMLElement>("[data-tab]")]
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)")
     const desktop = window.matchMedia("(min-width: 1024px)")
     const now = () => performance.now() / 1000
@@ -162,8 +230,8 @@ function MorphCard() {
     function measure(): Geometry[] {
       const scale = desktop.matches ? DESKTOP_SCALE : 1
       const available = document.documentElement.clientWidth - GUTTER
-      return SCENES.map((scene, i) => {
-        const width = Math.min(scene.width * scale, available)
+      return FOLDERS.map((folder, i) => {
+        const width = Math.min(folder.width * scale, available)
         const layer = layerEls[i]
         layer.style.width = `${width}px`
 
@@ -190,37 +258,50 @@ function MorphCard() {
       })
     }
 
-    // Tabs fill the top edge first. Whatever does not fit on the narrowest
-    // scene hangs from the bottom edge instead, as the same folder tab flipped.
-    const tabSides = SCENES.map(() => 1)
-    const tabWidths = SCENES.map(() => 0)
-    const tabLefts = SCENES.map(() => 0)
+    // Each set of tabs fills the top edge first. Whatever does not fit on the
+    // narrowest layer of its set hangs from the bottom edge instead, as the
+    // same folder tab flipped.
+    const tabSides = TABS.map(() => 1)
+    const tabWidths = TABS.map(() => 0)
+    const tabLefts = TABS.map(() => 0)
     const tabBacks = [...shape.querySelectorAll<SVGPathElement>("[data-tab-back]")]
     const tabFronts = [...shape.querySelectorAll<SVGGElement>("[data-tab-front]")]
+    const backLabels = TABS.map((_, i) =>
+      tabEls[i].querySelector<HTMLElement>("[data-back-label]")
+    )
     const [cardFill, cardEdge] = shape.querySelectorAll("rect")
-    function placeTabs(scenes: Geometry[]) {
-      const end = Math.min(...scenes.map((g) => g.width)) - TAB_INSET
-      let left = TAB_INSET
-      let side = 1
-      tabEls.forEach((tab, i) => {
-        const tabWidth = tab.offsetWidth
-        if (side === 1 && left > TAB_INSET && left + tabWidth > end) {
-          side = -1
-          left = TAB_INSET
-        }
-        tabSides[i] = side
-        tabWidths[i] = tabWidth
-        tabLefts[i] = left
-        tab.dataset.edge = side === 1 ? "top" : "bottom"
-        tab.style.left = `${left}px`
-        left += tabWidth + TAB_GAP
-      })
+    const cropMarks = shape.querySelector<SVGPathElement>("[data-crop]")!
+    const size = root.querySelector<HTMLElement>("[data-size]")!
+    function placeTabs(layers: Geometry[]) {
+      for (const set of new Set(TABS.map((tab) => tab.set))) {
+        const widths = layers.filter((_, i) => setOf(i) === set).map((g) => g.width)
+        const end = Math.min(...widths) - TAB_INSET
+        let left = TAB_INSET
+        let side = 1
+        TABS.forEach((tab, i) => {
+          if (tab.set !== set) return
+          const tabWidth = tabEls[i].offsetWidth
+          if (side === 1 && left > TAB_INSET && left + tabWidth > end) {
+            side = -1
+            left = TAB_INSET
+          }
+          tabSides[i] = side
+          tabWidths[i] = tabWidth
+          tabLefts[i] = left
+          tabEls[i].dataset.edge = side === 1 ? "top" : "bottom"
+          tabEls[i].style.left = `${left}px`
+          left += tabWidth + TAB_GAP
+        })
+      }
     }
 
     let geometry = measure()
     placeTabs(geometry)
     let index = 0
     let shownAt = -Infinity
+    let shownSet = ROOT
+    /** The scene the open project was opened from, and goes back to. */
+    let origin = 0
     /** Set when something other than a spring changed what should be drawn. */
     let dirty = true
 
@@ -234,12 +315,15 @@ function MorphCard() {
       b: new Spring(SEED / 2 + 3),
     }
     const accentRoundness = new Spring(1)
-    const layers = SCENES.map(() => ({ progress: new Spring(0), direction: 1 }))
-    const tabs = SCENES.map(() => ({ active: new Spring(0), enter: new Spring(0) }))
+    const layers = FOLDERS.map(() => ({ progress: new Spring(0), direction: 1 }))
+    const tabs = TABS.map(() => ({ active: new Spring(0), enter: new Spring(0) }))
     const nudges = { x: new Spring(0), y: new Spring(0) }
+    const crop = { width: new Spring(SEED), height: new Spring(SEED) }
     const springs = [
       width,
       height,
+      crop.width,
+      crop.height,
       radius,
       accentRoundness,
       ...Object.values(edges),
@@ -263,6 +347,8 @@ function MorphCard() {
     function morphTo(g: Geometry, t: number) {
       width.to(g.width, t, motion(MORPH))
       height.to(g.height, t, motion(MORPH))
+      crop.width.to(g.width, t, motion(CROP))
+      crop.height.to(g.height, t, motion(CROP))
       radius.to(RADIUS, t, motion(MORPH))
       moveAccent(g.accent, t)
     }
@@ -276,9 +362,8 @@ function MorphCard() {
       const morphAt = first || hurried ? t : t + EXIT_LEAD
       const enterAt = morphAt + (hurried ? HURRY_ENTER_DELAY : ENTER_DELAY)
 
-      SCENES.forEach((_, i) => {
-        const selected = i === next
-        if (selected) {
+      FOLDERS.forEach((_, i) => {
+        if (i === next) {
           layers[i].direction = direction
           layers[i].progress.to(1, enterAt, ENTER)
         } else {
@@ -286,18 +371,40 @@ function MorphCard() {
           if (layers[i].progress.target > 0) layers[i].direction = -direction
           layers[i].progress.to(0, t, EXIT)
         }
-        tabs[i].active.to(selected ? 1 : 0, morphAt, motion(MORPH))
-        tabEls[i].setAttribute("aria-selected", String(selected))
-        tabEls[i].tabIndex = selected ? 0 : -1
       })
+
+      // Going a level up or down swaps the whole set of tabs: the old set
+      // sinks behind the card at once, the new one rises after the morph.
+      const set = setOf(next)
+      let order = 0
+      TABS.forEach((tab, i) => {
+        if (set !== shownSet && tab.set === set) {
+          tabs[i].enter.to(1, morphAt + 0.12 + order++ * 0.06, motion(ENTER))
+        } else if (set !== shownSet && tab.set === shownSet) {
+          tabs[i].enter.to(0, t, motion(EXIT))
+        }
+        const selected = tab.layer === next
+        tabs[i].active.to(selected ? 1 : 0, morphAt, motion(MORPH))
+        if (tab.layer !== BACK) tabEls[i].setAttribute("aria-selected", String(selected))
+        tabEls[i].tabIndex = selected || (tab.layer === BACK && tab.set === set) ? 0 : -1
+      })
+      shownSet = set
 
       morphTo(geometry[next], morphAt)
       index = next
     }
 
     function go(next: number) {
-      if (next === index || !SCENES[next]) return
-      show(next, now(), Math.sign(next - index))
+      if (next === BACK) next = origin
+      if (next === index || !FOLDERS[next]) return
+      const opening = next >= SCENES.length && index < SCENES.length
+      const closing = next < SCENES.length && index >= SCENES.length
+      if (opening) {
+        origin = index
+        // The way back is labelled with the scene it leads to.
+        for (const label of backLabels) if (label) label.textContent = SCENES[origin].label
+      }
+      show(next, now(), opening ? 1 : closing ? -1 : Math.sign(next - index))
       pulse()
     }
     goRef.current = go
@@ -311,6 +418,12 @@ function MorphCard() {
     }
 
     function step(direction: number, axis: Axis) {
+      // Inside a project, stepping back leaves the folder.
+      if (index >= SCENES.length) {
+        if (direction < 0) go(origin)
+        else nudge(direction, axis)
+        return
+      }
       if (SCENES[index + direction]) go(index + direction)
       else nudge(direction, axis)
     }
@@ -330,6 +443,26 @@ function MorphCard() {
       cardEdge.setAttribute("rx", `${Math.max(0, cardRadius - 0.5)}`)
       root!.style.transform = `translate(${nudges.x.get(t)}px, ${nudges.y.get(t)}px)`
 
+      // Registration marks outside each corner. They trail the card, so a
+      // page turn knocks them out of register and they find their way back.
+      const cw = crop.width.get(t)
+      const ch = crop.height.get(t)
+      const o = CROP_GAP + 0.5
+      const a = CROP_ARM
+      cropMarks.setAttribute(
+        "d",
+        [
+          `M${-o - a} ${-o}H${-o}V${-o - a}`,
+          `M${cw + o + a} ${-o}H${cw + o}V${-o - a}`,
+          `M${-o - a} ${ch + o}H${-o}V${ch + o + a}`,
+          `M${cw + o + a} ${ch + o}H${cw + o}V${ch + o + a}`,
+        ].join("")
+      )
+      // The card measures itself, live, unless tabs hang where the figures go.
+      size.textContent = `${Math.round(cardWidth)} × ${Math.round(cardHeight)}`
+      size.style.top = `${cardHeight + CROP_GAP + 4}px`
+      size.style.opacity = TABS.some((tab, i) => tab.set === shownSet && tabSides[i] === -1) ? "0" : "1"
+
       const left = edges.l.get(t)
       const top = edges.t.get(t)
       accent!.style.transform = `translate(${left}px, ${top}px)`
@@ -342,7 +475,7 @@ function MorphCard() {
       accent!.style.height = `${accentHeight}px`
       accent!.style.borderRadius = `${(roundness * Math.min(accentWidth, accentHeight)) / 2}px`
 
-      SCENES.forEach((_, i) => {
+      FOLDERS.forEach((_, i) => {
         const el = layerEls[i]
         const { progress, direction } = layers[i]
         const p = clamp(progress.get(t))
@@ -354,13 +487,17 @@ function MorphCard() {
           el.style.filter = rest > 0.002 ? `blur(${rest * BLUR}px)` : ""
           el.style.transform = `translateY(${rest * SHIFT * direction}px)`
         }
+      })
 
+      TABS.forEach((_, i) => {
         // A resting tab sits low behind the card; the selected one rises and
         // takes the card's colour, so tab and card read as one sheet of paper.
         const tab = tabEls[i]
         const active = clamp(tabs[i].active.get(t))
         const entered = clamp(tabs[i].enter.get(t))
         tab.style.opacity = `${entered}`
+        // Tabs of another level are out of reach, not just out of sight.
+        tab.style.visibility = entered > 0.001 || tabs[i].enter.target > 0 ? "visible" : "hidden"
         const sunk = (1 - active) * TAB_REST + (1 - entered) * 8
         tab.style.transform = `translateY(${tabSides[i] * sunk}px)`
 
@@ -397,7 +534,9 @@ function MorphCard() {
     // Start as a small seed, then grow into the first scene.
     const start = now()
     show(0, start + 0.12, 1, true)
-    tabs.forEach((tab, i) => tab.enter.to(1, start + 0.5 + i * 0.06, motion(ENTER)))
+    TABS.forEach((tab, i) => {
+      if (tab.set === ROOT) tabs[i].enter.to(1, start + 0.5 + i * 0.06, motion(ENTER))
+    })
     render(start)
 
     // At rest there is nothing to draw, so a frame costs one check and the
@@ -488,12 +627,13 @@ function MorphCard() {
 
     function onKeyDown(event: KeyboardEvent) {
       if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return
-      const key = KEYS[event.key]
-      if (!key) return
-      event.preventDefault()
       const tabFocused = tabEls.includes(document.activeElement as HTMLElement)
-      step(...key)
-      if (tabFocused) tabEls[index].focus()
+      const key = KEYS[event.key]
+      if (event.key === "Escape" && index >= SCENES.length) go(origin)
+      else if (key) step(...key)
+      else return
+      event.preventDefault()
+      if (tabFocused) tabEls[TABS.findIndex((tab) => tab.layer === index)].focus()
     }
 
     window.addEventListener("wheel", onWheel, { passive: false })
@@ -542,36 +682,60 @@ function MorphCard() {
         aria-hidden
         className="pointer-events-none absolute top-0 left-0 size-px overflow-visible"
       >
-        {SCENES.map((scene) => (
-          <path key={scene.id} data-tab-back className="fill-(--tab)" style={TAB_COLOR} />
+        {TABS.map((tab) => (
+          <path key={tab.set + tab.layer} data-tab-back className="fill-(--tab)" style={TAB_COLOR} />
         ))}
         <rect className="fill-card" />
         <rect x={0.5} y={0.5} className="fill-none stroke-(--card-edge)" />
-        {SCENES.map((scene) => (
-          <g key={scene.id} data-tab-front style={TAB_COLOR}>
+        <path data-crop className="fill-none stroke-muted-foreground/45" />
+        {TABS.map((tab) => (
+          <g key={tab.set + tab.layer} data-tab-front style={TAB_COLOR}>
             <path className="fill-(--tab)" />
             <path className="fill-none stroke-(--tab-edge)" />
           </g>
         ))}
       </svg>
 
+      <span
+        data-size
+        aria-hidden
+        className="pointer-events-none absolute left-0 font-mono text-[0.625rem] text-muted-foreground/70 tabular-nums transition-opacity duration-200 select-none"
+      />
+
       <div role="tablist" aria-label="Sections" className="absolute inset-0">
-        {SCENES.map((scene, i) => (
+        {TABS.map((tab) => (
           <button
-            key={scene.id}
+            key={tab.set + tab.layer}
             type="button"
-            role="tab"
-            id={`tab-${scene.id}`}
-            aria-controls={`panel-${scene.id}`}
-            aria-selected={i === 0}
-            tabIndex={i === 0 ? 0 : -1}
-            onClick={() => goRef.current?.(i)}
-            className="group/tab absolute bottom-[calc(100%-1px)] left-[1.875rem] flex h-8 cursor-pointer items-center rounded-t-[10px] whitespace-nowrap data-[edge=bottom]:top-[calc(100%-1px)] data-[edge=bottom]:bottom-auto data-[edge=bottom]:rounded-t-none data-[edge=bottom]:rounded-b-[10px] data-[edge=bottom]:before:top-0 data-[edge=bottom]:before:-bottom-3 px-3.5 text-[0.8125rem] font-medium max-sm:px-2.5 max-[359px]:px-1.5 max-[359px]:text-xs text-card-foreground outline-none select-none [-webkit-tap-highlight-color:transparent] will-change-transform before:absolute before:inset-x-0 before:-top-3 before:bottom-0 focus-visible:ring-2 focus-visible:ring-clay/70"
-            style={{ opacity: 0 }}
+            data-tab
+            {...(tab.layer !== BACK && {
+              role: "tab",
+              id: `tab-${FOLDERS[tab.layer].id}`,
+              "aria-controls": `panel-${FOLDERS[tab.layer].id}`,
+              "aria-selected": tab.layer === 0,
+            })}
+            tabIndex={tab.layer === 0 ? 0 : -1}
+            onClick={() => goRef.current?.(tab.layer)}
+            className="group/tab absolute bottom-[calc(100%-1px)] left-[1.875rem] flex h-8 cursor-pointer items-center rounded-t-[10px] whitespace-nowrap data-[edge=bottom]:top-[calc(100%-1px)] data-[edge=bottom]:bottom-auto data-[edge=bottom]:rounded-t-none data-[edge=bottom]:rounded-b-[10px] data-[edge=bottom]:before:top-0 data-[edge=bottom]:before:-bottom-3 px-3 text-[0.8125rem] font-medium max-sm:px-2.5 max-[359px]:px-1.5 max-[359px]:text-xs text-card-foreground outline-none select-none [-webkit-tap-highlight-color:transparent] will-change-transform before:absolute before:inset-x-0 before:-top-3 before:bottom-0 focus-visible:ring-2 focus-visible:ring-clay/70"
+            style={{ opacity: 0, visibility: "hidden" }}
           >
             <span className="flex items-center gap-1.5 opacity-55 transition-[opacity,transform] duration-150 ease-out group-active/tab:scale-[0.97] group-aria-selected/tab:opacity-100 [@media(hover:hover)]:group-hover/tab:opacity-100">
-              <scene.icon aria-hidden className="size-3.5 max-lg:hidden" strokeWidth={1.75} />
-              {scene.label}
+              {tab.set !== ROOT && (
+                <tab.icon aria-hidden className="size-3.5" strokeWidth={1.75} />
+              )}
+              {tab.set === ROOT && (
+                <span className="font-mono text-[0.625rem] tabular-nums opacity-60 max-sm:hidden">
+                  {String(tab.layer + 1).padStart(2, "0")}
+                </span>
+              )}
+              {tab.layer === BACK ? (
+                <>
+                  <span className="sr-only">Back to</span>
+                  <span data-back-label>{tab.label}</span>
+                </>
+              ) : (
+                tab.label
+              )}
             </span>
           </button>
         ))}
@@ -583,6 +747,25 @@ function MorphCard() {
         style={{ width: SEED, height: SEED, borderRadius: SEED / 2 }}
       >
         <div ref={accentRef} aria-hidden className="absolute top-0 left-0 bg-clay" />
+
+        <Layer id="projects">
+          <CardHeader>
+            <Label anchorClassName="size-1.5 rounded-[1px]">built, never shipped</Label>
+          </CardHeader>
+          <CardContent>
+            {/* A bento of the works themselves: each tile is live, and opens its folder. */}
+            <ul className="grid grid-cols-2 gap-2">
+              {unpublished.map((project, i) => (
+                <Tile
+                  key={project.id}
+                  project={project}
+                  wide={i === 0}
+                  onOpen={() => goRef.current?.(layerOf(project.id))}
+                />
+              ))}
+            </ul>
+          </CardContent>
+        </Layer>
 
         <Layer id="github">
           <CardHeader>
@@ -597,9 +780,9 @@ function MorphCard() {
             <ul className="flex flex-col gap-2">
               {github.repos.map((repo) => (
                 <li key={repo.name} className="flex items-baseline justify-between gap-4">
-                  <Link href={repo.href}>
+                  <Open brand="github" onOpen={() => goRef.current?.(layerOf(repo.project))}>
                     {repo.name}
-                  </Link>
+                  </Open>
                   <span className="font-mono text-xs text-muted-foreground tabular-nums">
                     ★ {repo.stars}
                   </span>
@@ -630,9 +813,13 @@ function MorphCard() {
             <ul className="flex flex-col gap-2">
               {youtube.featured.map((video) => (
                 <li key={video.title} className="flex items-baseline justify-between gap-4">
-                  <Link href={video.href}>
-                    {video.title}
-                  </Link>
+                  {video.project ? (
+                    <Open brand="youtube" onOpen={() => goRef.current?.(layerOf(video.project))}>
+                      {video.title}
+                    </Open>
+                  ) : (
+                    <Link href={video.href}>{video.title}</Link>
+                  )}
                   <span className="shrink-0 text-xs text-muted-foreground">{video.meta}</span>
                 </li>
               ))}
@@ -677,6 +864,35 @@ function MorphCard() {
             </ul>
           </CardContent>
         </Layer>
+
+        {projects.map((project) => (
+          <Layer key={project.id} id={project.id}>
+            <CardHeader>
+              <Label anchorClassName="size-1.5 rounded-[1px]">{project.kind}</Label>
+              <CardTitle className="text-lg">{project.title}</CardTitle>
+              <CardDescription>{project.summary}</CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-5">
+              {project.figure && <HairlineFigure name={project.figure} />}
+              <Stats items={project.facts} />
+              <ul className="flex flex-col gap-2">
+                {project.links.map((link) => (
+                  <li key={link.href} className="flex items-baseline justify-between gap-4">
+                    <span className="shrink-0 font-mono text-xs text-muted-foreground">
+                      {link.label}
+                    </span>
+                    <Link href={link.href}>{link.value}</Link>
+                  </li>
+                ))}
+              </ul>
+              {project.verdict && (
+                <p className="border-t border-dashed pt-3 font-mono text-[0.6875rem] text-muted-foreground">
+                  verdict: {project.verdict}.
+                </p>
+              )}
+            </CardContent>
+          </Layer>
+        ))}
       </Card>
 
     </div>
@@ -688,7 +904,7 @@ function Layer({
   className,
   children,
 }: {
-  id: LayerId
+  id: string
   className?: string
   children: React.ReactNode
 }) {
@@ -801,6 +1017,7 @@ function Link({
         className
       )}
     >
+      <BrandMark brand={brandOf(href)} className="mr-0.5 shrink-0 self-center" />
       <span className="truncate underline decoration-foreground/25 underline-offset-4 transition-colors duration-150 [@media(hover:hover)]:group-hover/link:decoration-clay">
         {children}
       </span>
@@ -810,6 +1027,73 @@ function Link({
         strokeWidth={2}
       />
     </a>
+  )
+}
+
+/** One work in the Projects bento: its figure, live, over its name and the figure's read-out. */
+function Tile({
+  project,
+  wide,
+  onOpen,
+}: {
+  project: Project
+  wide: boolean
+  onOpen: () => void
+}) {
+  const readout = React.useRef<HTMLSpanElement>(null)
+  return (
+    <li
+      onClick={onOpen}
+      className={cn(
+        "flex cursor-pointer flex-col overflow-hidden rounded-xl bg-muted/25 ring-1 ring-(--card-edge) transition-[background-color] duration-200 [@media(hover:hover)]:hover:bg-muted/45",
+        wide && "col-span-2"
+      )}
+    >
+      {project.figure && (
+        <HairlineFigure name={project.figure} band={wide ? [46, 258] : [55, 275]} readout={readout} />
+      )}
+      <div className="flex items-baseline justify-between gap-3 px-3 pt-1 pb-2.5">
+        <Open onOpen={onOpen}>{project.label}</Open>
+        <span
+          ref={readout}
+          aria-live="polite"
+          className="truncate font-mono text-[0.625rem] text-muted-foreground tabular-nums"
+        />
+      </div>
+    </li>
+  )
+}
+
+/**
+ * Opens a project's folder on this site. Same underline as a link, but the
+ * arrow points along the page instead of out of it: this one stays here.
+ */
+function Open({
+  brand = null,
+  onOpen,
+  children,
+}: {
+  /** Where the work lives, shown as that site's mark. */
+  brand?: Brand | null
+  onOpen: () => void
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className="group/link inline-flex max-w-full min-w-0 cursor-pointer items-baseline gap-1 rounded-sm text-left outline-none transition-opacity duration-150 focus-visible:ring-2 focus-visible:ring-clay/70 active:opacity-60"
+    >
+      <BrandMark brand={brand} className="mr-0.5 shrink-0 self-center" />
+      <span className="truncate underline decoration-foreground/25 underline-offset-4 transition-colors duration-150 [@media(hover:hover)]:group-hover/link:decoration-clay">
+        {children}
+      </span>
+      <ArrowRight
+        aria-hidden
+        className="size-[0.85em] shrink-0 self-center text-muted-foreground transition-[color,translate] duration-150 ease-out [@media(hover:hover)]:group-hover/link:translate-x-0.5 [@media(hover:hover)]:group-hover/link:text-clay"
+        strokeWidth={2}
+      />
+    </button>
   )
 }
 

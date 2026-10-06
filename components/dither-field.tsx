@@ -4,11 +4,10 @@ import * as React from "react"
 
 import { cn } from "@/lib/utils"
 
-/** Lightest to heaviest. A cell never jumps between glyphs, it crossfades. */
-const RAMP = " .·:-=+*#"
-const CELL_WIDTH = 11
-const CELL_HEIGHT = 18
-const FONT_SIZE = 11
+/** One dither cell, in CSS px. Each cell is a single square dot, lit or not. */
+const CELL = 3
+/** Share of the cell the dot covers, so neighbours read as pixels, not a fill. */
+const DOT = 0.67
 
 /** Size of one swell of the noise that bends the rings, in px. */
 const NOISE_SCALE = 240
@@ -21,9 +20,19 @@ const MAX_RINGS = 16
 /** One breath, in seconds, and the share of it spent breathing in. */
 const BREATH = 6.5
 const INHALE = 0.4
-/** How much of each glyph's ink the colour wash replaces. */
-const TINT = 0.6
-const TINT_CHROMA = 0.15
+
+/** Rows of cells that tear together, and how often the tears are re-rolled per second. */
+const BAND = 4
+const GLITCH_RATE = 14
+/** Share of bands torn at rest, at the top of a breath, and right after a pulse. */
+const TEAR_REST = 0.004
+const TEAR_BREATH = 0.01
+const TEAR_PULSE = 0.3
+/** How far a torn band slides, in cells, at most. */
+const TEAR_SHIFT = 18
+/** How fast the tearing after a pulse dies down, per second. */
+const TEAR_DECAY = 5
+
 /** Phones and touch devices get a plain background. Mirrors the classes on the canvas. */
 const MOBILE = "(max-width: 767.98px), (pointer: coarse)"
 
@@ -48,23 +57,6 @@ function breath(t: number) {
     : 1 - smoothstep(INHALE, 1, phase)
 }
 
-/** OKLCH to sRGB, each channel 0..1. */
-function oklch(lightness: number, chroma: number, hue: number) {
-  const a = chroma * Math.cos((hue * Math.PI) / 180)
-  const b = chroma * Math.sin((hue * Math.PI) / 180)
-  const l = (lightness + 0.3963377774 * a + 0.2158037573 * b) ** 3
-  const m = (lightness - 0.1055613458 * a - 0.0638541728 * b) ** 3
-  const s = (lightness - 0.0894841775 * a - 1.291485548 * b) ** 3
-  return [
-    4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
-    -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
-    -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s,
-  ].map((linear) => {
-    const x = Math.min(1, Math.max(0, linear))
-    return x <= 0.0031308 ? 12.92 * x : 1.055 * x ** (1 / 2.4) - 0.055
-  })
-}
-
 const float = (value: number) => value.toFixed(4)
 
 const VERTEX = `
@@ -78,20 +70,18 @@ void main() {
 const FRAGMENT = `
 precision highp float;
 
-uniform sampler2D atlas;
 /** Canvas and cell size in device px, and device px per CSS px. */
 uniform vec2 size;
-uniform vec2 cell;
+uniform float cell;
 uniform float ratio;
 uniform float time;
 uniform float air;
 uniform float strength;
+/** Share of bands torn right now. */
+uniform float tear;
 /** Radius and gain of each ring sent by pulse(). */
 uniform vec2 rings[${MAX_RINGS}];
 uniform vec3 ink;
-uniform vec3 wash[3];
-
-const float GLYPHS = ${float(RAMP.length)};
 
 float hash(vec2 p) {
   return fract(sin(p.x * 127.1 + p.y * 311.7) * 43758.5453);
@@ -109,11 +99,18 @@ float noise(vec2 p) {
   );
 }
 
-void main() {
-  vec2 px = vec2(gl_FragCoord.x, size.y - gl_FragCoord.y);
-  vec2 inCell = fract(px / cell);
-  // Everything below is evaluated at the centre of the cell, in CSS px.
-  vec2 p = (floor(px / cell) + 0.5) * cell / ratio;
+/** Ordered-dither thresholds, built up from the 2x2 matrix without integer maths. */
+float bayer2(vec2 a) {
+  a = floor(a);
+  return fract(a.x / 2.0 + a.y * a.y * 0.75);
+}
+float bayer4(vec2 a) { return bayer2(0.5 * a) * 0.25 + bayer2(a); }
+float bayer8(vec2 a) { return bayer4(0.5 * a) * 0.25 + bayer2(a); }
+
+/** Density of the field at a cell, 0..1. */
+float field(vec2 c) {
+  // Evaluated at the centre of the cell, in CSS px.
+  vec2 p = (c + 0.5) * cell / ratio;
   float dist = length(p - size / ratio * 0.5);
   float envelope = smoothstep(120.0, 480.0 - air * 90.0, dist);
 
@@ -131,38 +128,50 @@ void main() {
     float offset = (reach - rings[i].x) / ${float(PULSE_WIDTH)};
     value += exp(-0.5 * offset * offset) * rings[i].y;
   }
+  return min(1.0, value) * envelope;
+}
 
-  float level = min(1.0, value) * envelope * (GLYPHS - 1.0);
-  float glyph = floor(level);
-  float next = min(glyph + 1.0, GLYPHS - 1.0);
-  float alpha = strength * mix(
-    texture2D(atlas, vec2((glyph + inCell.x) / GLYPHS, inCell.y)).a,
-    texture2D(atlas, vec2((next + inCell.x) / GLYPHS, inCell.y)).a,
-    level - glyph
-  );
+/** 1 where the cell's dot is lit. The threshold travels with the cell, so a torn band keeps its pattern. */
+float lit(vec2 c) {
+  return step(bayer8(c) + 0.5 / 64.0, field(c));
+}
 
-  // Colour only the glyphs: warm near the card, cooling toward the edges.
-  float inner = 100.0 * ratio;
-  float g = clamp(
-    (length(px - size * 0.5) - inner) / (max(size.x, size.y) * 0.6 - inner),
-    0.0,
-    1.0
-  );
-  vec3 tint = g < 0.5
-    ? mix(wash[0], wash[1], g * 2.0)
-    : mix(wash[1], wash[2], g * 2.0 - 1.0);
-  gl_FragColor = vec4(mix(ink, tint, ${float(TINT)}) * alpha, alpha);
+void main() {
+  vec2 px = vec2(gl_FragCoord.x, size.y - gl_FragCoord.y);
+  vec2 c = floor(px / cell);
+  vec2 inCell = fract(px / cell);
+  float pixel = step(inCell.x, ${float(DOT)}) * step(inCell.y, ${float(DOT)});
+
+  // A torn band is a run of rows that slides sideways for a tick, as if the
+  // signal slipped. Ticks are stepped, so tears snap instead of gliding.
+  float band = floor(c.y / ${float(BAND)});
+  float tick = floor(time * ${float(GLITCH_RATE)});
+  float torn = step(1.0 - tear, hash(vec2(band, tick)));
+  float shift = floor((hash(vec2(tick, band)) - 0.5) * 2.0 * ${float(TEAR_SHIFT)});
+  vec2 source = c - vec2(torn * shift, 0.0);
+
+  float lead = lit(source);
+  // Torn bands also split their colour: one channel lags a couple of cells behind.
+  float ghost = lead;
+  if (torn > 0.5) ghost = lit(source + vec2(sign(shift) * 2.0, 0.0));
+
+  float both = lead * ghost;
+  vec3 color = ink * both
+    + mix(ink, vec3(1.0, 0.24, 0.3), 0.35) * (lead - both)
+    + mix(ink, vec3(0.2, 0.85, 1.0), 0.35) * (ghost - both);
+  float alpha = strength * pixel * max(lead, ghost);
+  gl_FragColor = vec4(color * alpha, alpha);
 }`
 
 /**
- * A grid of monospace glyphs shaded by slow rings around the centre. The field
- * breathes: on the in-breath the rings draw inward and brighten, on the
- * out-breath they let go and travel outward. Drifting noise bends the rings
- * and thins them out in places, and a faint colour wash runs from warm at the
- * centre to cool at the edges.
+ * A field of ordered-dither dots shaded by slow rings around the centre. The
+ * field breathes: on the in-breath the rings draw inward and thicken, on the
+ * out-breath they let go and travel outward. Every so often a band of rows
+ * slips sideways and splits its colour, like a signal losing lock; each
+ * pulse() makes that happen a lot more for a moment.
  */
-function AsciiField({
-  strength = 0.24,
+function DitherField({
+  strength = 0.07,
   className,
 }: {
   strength?: number
@@ -177,9 +186,8 @@ function AsciiField({
       depth: false,
       stencil: false,
     })
-    const atlas = document.createElement("canvas")
-    const atlasCtx = atlas.getContext("2d")
-    if (!canvas || !gl || !atlasCtx) return
+    const probe = document.createElement("canvas").getContext("2d")
+    if (!canvas || !gl || !probe) return
 
     const program = gl.createProgram()
     for (const [type, source] of [
@@ -202,12 +210,6 @@ function AsciiField({
     gl.enableVertexAttribArray(0)
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0)
 
-    gl.bindTexture(gl.TEXTURE_2D, gl.createTexture())
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
-
     const uniform = (name: string) => gl.getUniformLocation(program, name)
     const uniforms = {
       size: uniform("size"),
@@ -215,9 +217,9 @@ function AsciiField({
       ratio: uniform("ratio"),
       time: uniform("time"),
       air: uniform("air"),
+      tear: uniform("tear"),
       rings: uniform("rings"),
       ink: uniform("ink"),
-      wash: uniform("wash"),
     }
     gl.uniform1f(uniform("strength"), strength)
 
@@ -233,29 +235,16 @@ function AsciiField({
       const ratio = Math.min(window.devicePixelRatio || 1, 2)
       canvas!.width = Math.round(canvas!.clientWidth * ratio)
       canvas!.height = Math.round(canvas!.clientHeight * ratio)
-      const cellWidth = Math.ceil(CELL_WIDTH * ratio)
-      const cellHeight = Math.ceil(CELL_HEIGHT * ratio)
 
-      // Glyphs are rasterised once into a texture the shader samples from.
-      const style = getComputedStyle(canvas!)
-      atlas.width = cellWidth * RAMP.length
-      atlas.height = cellHeight
       // The ink colour can be in any CSS colour space; painting it resolves it to sRGB.
-      atlasCtx!.fillStyle = style.color
-      atlasCtx!.fillRect(0, 0, 1, 1)
-      const [red, green, blue] = atlasCtx!.getImageData(0, 0, 1, 1).data
-      atlasCtx!.clearRect(0, 0, 1, 1)
-      atlasCtx!.font = `${FONT_SIZE * ratio}px ${style.fontFamily}`
-      atlasCtx!.textAlign = "center"
-      atlasCtx!.textBaseline = "middle"
-      for (let i = 1; i < RAMP.length; i++) {
-        atlasCtx!.fillText(RAMP[i], i * cellWidth + cellWidth / 2, cellHeight / 2)
-      }
-      gl!.texImage2D(gl!.TEXTURE_2D, 0, gl!.RGBA, gl!.RGBA, gl!.UNSIGNED_BYTE, atlas)
+      probe!.fillStyle = getComputedStyle(canvas!).color
+      probe!.fillRect(0, 0, 1, 1)
+      const [red, green, blue] = probe!.getImageData(0, 0, 1, 1).data
 
       gl!.viewport(0, 0, canvas!.width, canvas!.height)
       gl!.uniform2f(uniforms.size, canvas!.width, canvas!.height)
-      gl!.uniform2f(uniforms.cell, cellWidth, cellHeight)
+      // Whole device pixels per cell, so every dot is the same size.
+      gl!.uniform1f(uniforms.cell, Math.round(CELL * ratio))
       gl!.uniform1f(uniforms.ratio, ratio)
       gl!.uniform3f(uniforms.ink, red / 255, green / 255, blue / 255)
       if (reducedMotion.matches) draw(0)
@@ -264,23 +253,22 @@ function AsciiField({
     function draw(t: number) {
       pulses = pulses.filter((at) => t - at < PULSE_LIFE)
       rings.fill(0)
+      let jolt = 0
       pulses.forEach((at, i) => {
         const since = t - at
         if (since < 0) return
         rings[i * 2] = since * PULSE_SPEED
         rings[i * 2 + 1] = Math.exp(-since * 0.7)
+        jolt += Math.exp(-since * TEAR_DECAY)
       })
       const air = breath(t)
-      // The whole wash shifts a little with each breath.
-      const hue = 40 + air * 45
-      const lightness = colorScheme.matches ? 0.8 : 0.55
+      const tear = reducedMotion.matches
+        ? 0
+        : TEAR_REST + TEAR_BREATH * air + TEAR_PULSE * Math.min(1, jolt)
       gl!.uniform1f(uniforms.time, t)
       gl!.uniform1f(uniforms.air, air)
+      gl!.uniform1f(uniforms.tear, tear)
       gl!.uniform2fv(uniforms.rings, rings)
-      gl!.uniform3fv(
-        uniforms.wash,
-        [0, 70, 150].flatMap((shift) => oklch(lightness, TINT_CHROMA, hue - shift))
-      )
       gl!.drawArrays(gl!.TRIANGLES, 0, 3)
     }
 
@@ -298,11 +286,10 @@ function AsciiField({
     }
 
     sync()
-    document.fonts.ready.then(build)
 
     const resizeObserver = new ResizeObserver(build)
     resizeObserver.observe(canvas)
-    // The glyphs are tinted with the current ink colour.
+    // The dots are drawn in the current ink colour.
     colorScheme.addEventListener("change", build)
     mobile.addEventListener("change", sync)
 
@@ -320,12 +307,9 @@ function AsciiField({
     <canvas
       ref={ref}
       aria-hidden
-      className={cn(
-        "pointer-events-none font-mono max-md:hidden pointer-coarse:hidden",
-        className
-      )}
+      className={cn("pointer-events-none max-md:hidden pointer-coarse:hidden", className)}
     />
   )
 }
 
-export { AsciiField, pulse }
+export { DitherField, pulse }
