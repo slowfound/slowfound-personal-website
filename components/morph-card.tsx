@@ -1293,6 +1293,8 @@ function Switches({
   return (
     <div
       data-switches
+      // The pair keeps its order in both directions: theme first, language second.
+      dir="ltr"
       className="absolute top-0 left-1/2 flex gap-2 will-change-transform"
       style={{ opacity: 0, height: SWITCH }}
     >
