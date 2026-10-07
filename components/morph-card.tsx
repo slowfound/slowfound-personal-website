@@ -1,6 +1,7 @@
 "use client"
 
 import * as React from "react"
+import { flushSync } from "react-dom"
 import Image from "next/image"
 import {
   ArrowLeft,
@@ -15,7 +16,7 @@ import {
   Play,
 } from "lucide-react"
 
-import { type Brand, BrandMark, brandOf } from "@/components/brand-icons"
+import { BrandMark, brandOf } from "@/components/brand-icons"
 import { pulse } from "@/components/dither-field"
 import { HairlineFigure } from "@/components/hairline-figure"
 import {
@@ -34,7 +35,8 @@ import {
   work,
   youtube,
 } from "@/lib/profile"
-import { Spring, type SpringConfig } from "@/lib/spring"
+import { dir, type Locale, num, type Text, tr, ui } from "@/lib/i18n"
+import { cssSpring, Spring, type SpringConfig } from "@/lib/spring"
 import { cn } from "@/lib/utils"
 
 type Axis = "x" | "y"
@@ -42,18 +44,18 @@ type Axis = "x" | "y"
 type Folder = {
   id: string
   /** Shown on the folder tab. */
-  label: string
+  label: Text
   icon: LucideIcon
   /** In px, before `DESKTOP_SCALE`. */
   width: number
 }
 
 const SCENES: Folder[] = [
-  { id: "projects", label: "Projects", icon: Boxes, width: 520 },
-  { id: "github", label: "GitHub", icon: GitBranch, width: 445 },
-  { id: "youtube", label: "YouTube", icon: Play, width: 445 },
-  { id: "work", label: "Work", icon: BriefcaseBusiness, width: 465 },
-  { id: "contact", label: "Contact", icon: Mail, width: 445 },
+  { id: "projects", label: { en: "Projects", fa: "پروژه‌ها" }, icon: Boxes, width: 520 },
+  { id: "github", label: { en: "GitHub", fa: "گیت‌هاب" }, icon: GitBranch, width: 445 },
+  { id: "youtube", label: { en: "YouTube", fa: "یوتیوب" }, icon: Play, width: 445 },
+  { id: "work", label: { en: "Work", fa: "سوابق" }, icon: BriefcaseBusiness, width: 465 },
+  { id: "contact", label: { en: "Contact", fa: "تماس" }, icon: Mail, width: 445 },
 ]
 
 const projects = [...unpublished, ...published]
@@ -85,22 +87,13 @@ function layerOf(projectId: string) {
   return FOLDERS.findIndex((folder) => folder.id === projectId)
 }
 
-type Tab = { set: string; layer: number; label: string; icon: LucideIcon }
+/** The way back has no label of its own: it names the scene it leads to. */
+type Tab = { set: string; layer: number; label: Text | null; icon: LucideIcon }
 
 const TABS: Tab[] = [
   ...SCENES.map((scene, i) => ({ set: ROOT, layer: i, label: scene.label, icon: scene.icon })),
   ...projects.flatMap((project) => [
-    {
-      set: project.id,
-      layer: BACK,
-      // Rewritten on open to name the scene it was opened from.
-      label: unpublished.includes(project)
-        ? "Projects"
-        : github.repos.some((repo) => repo.project === project.id)
-          ? "GitHub"
-          : "YouTube",
-      icon: ArrowLeft,
-    },
+    { set: project.id, layer: BACK, label: null, icon: ArrowLeft },
     { set: project.id, layer: layerOf(project.id), label: project.label, icon: FolderOpen },
   ]),
 ]
@@ -123,7 +116,9 @@ const SHIFT = 5
 const SEED = 56
 /** One corner radius for every scene. */
 const RADIUS = 14
-const GUTTER = 32
+/** Room left on either side of the card, per side: enough for the registration marks to breathe. */
+const GUTTER = 16
+const GUTTER_MOBILE = 22
 /** On desktop the card body is wider to leave room for content; type stays the same size. */
 const DESKTOP_SCALE = 1.15
 /** How far a resting tab sinks behind the card, and how far the card gives at either end. */
@@ -141,6 +136,11 @@ const CROP_GAP = 6
 const CROP_ARM = 7
 /** The marks follow the card on a slower spring, so they lose register while it moves. */
 const CROP: SpringConfig = { duration: 1.05, bounce: 0.12 }
+/** The switches under the card: their size, and their distance from its lower edge. */
+const SWITCH = 32
+const SWITCH_GAP = CROP_GAP + CROP_ARM + 14
+/** Under a row of bottom tabs instead. */
+const SWITCH_GAP_TABS = TAB_HEIGHT + 14
 
 /** A wheel gesture ends once the wheel has been quiet for this long (ms). */
 const WHEEL_IDLE = 140
@@ -203,12 +203,92 @@ function tabOutline(width: number, flare: number, top: number) {
 type Box = { l: number; t: number; r: number; b: number; roundness: number }
 type Geometry = { width: number; height: number; accent: Box }
 
+type Theme = "light" | "dark"
+
+function remember(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value)
+  } catch {}
+}
+
+/** How long the colours take to blend; matches --theme-blend in globals.css. */
+const THEME_BLEND = 600
+let blendTimer = 0
+
+/** Changes the theme, with every colour blending over from the old one. */
+function blend(theme: Theme) {
+  const html = document.documentElement
+  html.dataset.blending = ""
+  html.dataset.theme = theme
+  clearTimeout(blendTimer)
+  blendTimer = window.setTimeout(() => delete html.dataset.blending, THEME_BLEND)
+}
+
 function MorphCard() {
   const rootRef = React.useRef<HTMLDivElement>(null)
   const cardRef = React.useRef<HTMLDivElement>(null)
   const shapeRef = React.useRef<SVGSVGElement>(null)
   const accentRef = React.useRef<HTMLDivElement>(null)
   const goRef = React.useRef<(index: number) => void>(null)
+  /** Turns the card's content over in place, running `apply` while it is out of sight. */
+  const relabelRef = React.useRef<(apply: () => void) => void>(null)
+
+  // The server renders English in light mode. The real values were put on
+  // <html> before the first paint (see PREFERENCES_SCRIPT) and are picked up
+  // here, still before anything is visible.
+  const [locale, setLocale] = React.useState<Locale>("en")
+  /** The language the visitor last asked for. The card turns over a moment after it. */
+  const [chosen, setChosen] = React.useState<Locale>("en")
+  const [theme, setTheme] = React.useState<Theme>("light")
+  /** The scene the open project was opened from, named on the way back. */
+  const [origin, setOrigin] = React.useState(0)
+  /** False until the first paint, so the switches do not animate into their starting state. */
+  const [settled, setSettled] = React.useState(false)
+
+  React.useLayoutEffect(() => {
+    const html = document.documentElement
+    const initial = html.lang === "fa" ? "fa" : "en"
+    setLocale(initial)
+    setChosen(initial)
+    setTheme(html.dataset.theme === "dark" ? "dark" : "light")
+    const frame = requestAnimationFrame(() => setSettled(true))
+
+    // Until the visitor picks a theme, the page keeps following the system.
+    const system = window.matchMedia("(prefers-color-scheme: dark)")
+    function follow() {
+      try {
+        if (localStorage.getItem("theme")) return
+      } catch {}
+      const next = system.matches ? "dark" : "light"
+      blend(next)
+      setTheme(next)
+    }
+    system.addEventListener("change", follow)
+    return () => {
+      cancelAnimationFrame(frame)
+      system.removeEventListener("change", follow)
+    }
+  }, [])
+
+  function switchTheme() {
+    const next = theme === "dark" ? "light" : "dark"
+    blend(next)
+    remember("theme", next)
+    setTheme(next)
+    pulse()
+  }
+
+  function switchLocale() {
+    const next = chosen === "fa" ? "en" : "fa"
+    setChosen(next)
+    remember("locale", next)
+    relabelRef.current?.(() => {
+      const html = document.documentElement
+      html.lang = next
+      html.dir = dir(next)
+      setLocale(next)
+    })
+  }
 
   React.useLayoutEffect(() => {
     const root = rootRef.current
@@ -223,13 +303,18 @@ function MorphCard() {
     const tabEls = [...root.querySelectorAll<HTMLElement>("[data-tab]")]
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)")
     const desktop = window.matchMedia("(min-width: 1024px)")
+    const phone = window.matchMedia("(max-width: 639.98px)")
     const now = () => performance.now() / 1000
+    /** Right to left, tabs start from the right and sideways gestures swap meaning. */
+    let rtl = document.documentElement.dir === "rtl"
     const motion = (config: SpringConfig) => (reducedMotion.matches ? SNAP : config)
     const clamp = (value: number) => Math.min(1, Math.max(0, value))
 
     function measure(): Geometry[] {
+      rtl = document.documentElement.dir === "rtl"
       const scale = desktop.matches ? DESKTOP_SCALE : 1
-      const available = document.documentElement.clientWidth - GUTTER
+      const available =
+        document.documentElement.clientWidth - 2 * (phone.matches ? GUTTER_MOBILE : GUTTER)
       return FOLDERS.map((folder, i) => {
         const width = Math.min(folder.width * scale, available)
         const layer = layerEls[i]
@@ -266,12 +351,9 @@ function MorphCard() {
     const tabLefts = TABS.map(() => 0)
     const tabBacks = [...shape.querySelectorAll<SVGPathElement>("[data-tab-back]")]
     const tabFronts = [...shape.querySelectorAll<SVGGElement>("[data-tab-front]")]
-    const backLabels = TABS.map((_, i) =>
-      tabEls[i].querySelector<HTMLElement>("[data-back-label]")
-    )
     const [cardFill, cardEdge] = shape.querySelectorAll("rect")
     const cropMarks = shape.querySelector<SVGPathElement>("[data-crop]")!
-    const size = root.querySelector<HTMLElement>("[data-size]")!
+    const switches = root.querySelector<HTMLElement>("[data-switches]")!
     function placeTabs(layers: Geometry[]) {
       for (const set of new Set(TABS.map((tab) => tab.set))) {
         const widths = layers.filter((_, i) => setOf(i) === set).map((g) => g.width)
@@ -289,7 +371,8 @@ function MorphCard() {
           tabWidths[i] = tabWidth
           tabLefts[i] = left
           tabEls[i].dataset.edge = side === 1 ? "top" : "bottom"
-          tabEls[i].style.left = `${left}px`
+          // From the inline start, so a right-to-left card lays them out from the right.
+          tabEls[i].style.insetInlineStart = `${left}px`
           left += tabWidth + TAB_GAP
         })
       }
@@ -302,6 +385,7 @@ function MorphCard() {
     let shownSet = ROOT
     /** The scene the open project was opened from, and goes back to. */
     let origin = 0
+    let relabelTimer = 0
     /** Set when something other than a spring changed what should be drawn. */
     let dirty = true
 
@@ -319,7 +403,12 @@ function MorphCard() {
     const tabs = TABS.map(() => ({ active: new Spring(0), enter: new Spring(0) }))
     const nudges = { x: new Spring(0), y: new Spring(0) }
     const crop = { width: new Spring(SEED), height: new Spring(SEED) }
+    /** How far below the card the switches sit, and how far they have faded in. */
+    const switchGap = new Spring(SWITCH_GAP)
+    const switchIn = new Spring(0)
     const springs = [
+      switchGap,
+      switchIn,
       width,
       height,
       crop.width,
@@ -351,6 +440,9 @@ function MorphCard() {
       crop.height.to(g.height, t, motion(CROP))
       radius.to(RADIUS, t, motion(MORPH))
       moveAccent(g.accent, t)
+      // The switches make way for a row of bottom tabs.
+      const bottomTabs = TABS.some((tab, i) => tab.set === shownSet && tabSides[i] === -1)
+      switchGap.to(bottomTabs ? SWITCH_GAP_TABS : SWITCH_GAP, t, motion(MORPH))
     }
 
     /** `direction` is 1 when moving to a later scene, -1 to an earlier one. */
@@ -402,12 +494,49 @@ function MorphCard() {
       if (opening) {
         origin = index
         // The way back is labelled with the scene it leads to.
-        for (const label of backLabels) if (label) label.textContent = SCENES[origin].label
+        setOrigin(origin)
       }
       show(next, now(), opening ? 1 : closing ? -1 : Math.sign(next - index))
       pulse()
     }
     goRef.current = go
+
+    /**
+     * A change of language turns the card over where it stands: the content
+     * and tabs clear, the words change while nothing is showing, and the card
+     * morphs to fit them as they come back in. Right to left, the tabs and the
+     * clay mark cross to the other side on the way.
+     */
+    function relabel(apply: () => void) {
+      const t = now()
+      layers[index].direction = -1
+      layers[index].progress.to(0, t, EXIT)
+      TABS.forEach((tab, i) => {
+        if (tab.set === shownSet) tabs[i].enter.to(0, t, motion(EXIT))
+      })
+      pulse()
+      clearTimeout(relabelTimer)
+      relabelTimer = window.setTimeout(
+        () => {
+          flushSync(apply)
+          geometry = measure()
+          placeTabs(geometry)
+          const at = now()
+          shownAt = at
+          morphTo(geometry[index], at)
+          layers[index].direction = 1
+          layers[index].progress.to(1, at + ENTER_DELAY, ENTER)
+          let order = 0
+          TABS.forEach((tab, i) => {
+            if (tab.set === shownSet)
+              tabs[i].enter.to(1, at + 0.12 + order++ * 0.06, motion(ENTER))
+          })
+          dirty = true
+        },
+        reducedMotion.matches ? 0 : EXIT.duration * 1000
+      )
+    }
+    relabelRef.current = relabel
 
     /** At either end there is nowhere to go, so the card gives a little and settles. */
     function nudge(direction: number, axis: Axis) {
@@ -417,15 +546,17 @@ function MorphCard() {
       nudges[axis].to(0, t + 0.1, NUDGE_BACK)
     }
 
-    function step(direction: number, axis: Axis) {
+    /** `heading` is on screen: 1 is right or down. Right to left, rightwards is back. */
+    function step(heading: number, axis: Axis) {
+      const direction = axis === "x" && rtl ? -heading : heading
       // Inside a project, stepping back leaves the folder.
       if (index >= SCENES.length) {
         if (direction < 0) go(origin)
-        else nudge(direction, axis)
+        else nudge(heading, axis)
         return
       }
       if (SCENES[index + direction]) go(index + direction)
-      else nudge(direction, axis)
+      else nudge(heading, axis)
     }
 
     function render(t: number) {
@@ -441,7 +572,6 @@ function MorphCard() {
       cardEdge.setAttribute("width", `${Math.max(0, cardWidth - 1)}`)
       cardEdge.setAttribute("height", `${Math.max(0, cardHeight - 1)}`)
       cardEdge.setAttribute("rx", `${Math.max(0, cardRadius - 0.5)}`)
-      root!.style.transform = `translate(${nudges.x.get(t)}px, ${nudges.y.get(t)}px)`
 
       // Registration marks outside each corner. They trail the card, so a
       // page turn knocks them out of register and they find their way back.
@@ -458,10 +588,16 @@ function MorphCard() {
           `M${cw + o + a} ${ch + o}H${cw + o}V${ch + o + a}`,
         ].join("")
       )
-      // The card measures itself, live, unless tabs hang where the figures go.
-      size.textContent = `${Math.round(cardWidth)} × ${Math.round(cardHeight)}`
-      size.style.top = `${cardHeight + CROP_GAP + 4}px`
-      size.style.opacity = TABS.some((tab, i) => tab.set === shownSet && tabSides[i] === -1) ? "0" : "1"
+      // The switches ride the card's lower edge. The whole stack is pulled up
+      // by half of what hangs below the card past the tabs above it, so it
+      // stays centred on the page.
+      const gap = switchGap.get(t)
+      const shown = clamp(switchIn.get(t))
+      switches.style.transform = `translate(-50%, ${cardHeight + gap + (1 - shown) * 6}px)`
+      switches.style.opacity = `${shown}`
+      const lift = (gap + SWITCH - TAB_HEIGHT) / 2
+
+      root!.style.transform = `translate(${nudges.x.get(t)}px, ${nudges.y.get(t) - lift}px)`
 
       const left = edges.l.get(t)
       const top = edges.t.get(t)
@@ -506,10 +642,9 @@ function MorphCard() {
         const outline = tabOutline(tabWidths[i], active * TAB_FLARE, 1 - TAB_HEIGHT + sunk)
         const foot = `H${0.5 - active * TAB_FLARE}Z`
         // Bottom tabs are the same shape, flipped onto the card's lower edge.
+        const x = rtl ? cardWidth - tabLefts[i] - tabWidths[i] : tabLefts[i]
         const place =
-          tabSides[i] === 1
-            ? `translate(${tabLefts[i]})`
-            : `translate(${tabLefts[i]} ${cardHeight}) scale(1 -1)`
+          tabSides[i] === 1 ? `translate(${x})` : `translate(${x} ${cardHeight}) scale(1 -1)`
 
         // Behind the card, the tab's body runs on underneath it.
         const back = tabBacks[i]
@@ -537,6 +672,7 @@ function MorphCard() {
     TABS.forEach((tab, i) => {
       if (tab.set === ROOT) tabs[i].enter.to(1, start + 0.5 + i * 0.06, motion(ENTER))
     })
+    switchIn.to(1, start + 0.5 + SCENES.length * 0.06, motion(ENTER))
     render(start)
 
     // At rest there is nothing to draw, so a frame costs one check and the
@@ -661,6 +797,7 @@ function MorphCard() {
     return () => {
       cancelAnimationFrame(frame)
       cancelAnimationFrame(queued)
+      clearTimeout(relabelTimer)
       resizeObserver.disconnect()
       window.removeEventListener("wheel", onWheel)
       window.removeEventListener("touchstart", onTouchStart)
@@ -696,13 +833,15 @@ function MorphCard() {
         ))}
       </svg>
 
-      <span
-        data-size
-        aria-hidden
-        className="pointer-events-none absolute left-0 font-mono text-[0.625rem] text-muted-foreground/70 tabular-nums transition-opacity duration-200 select-none"
+      <Switches
+        theme={theme}
+        locale={chosen}
+        settled={settled}
+        onTheme={switchTheme}
+        onLocale={switchLocale}
       />
 
-      <div role="tablist" aria-label="Sections" className="absolute inset-0">
+      <div role="tablist" aria-label={tr(ui.sections, locale)} className="absolute inset-0">
         {TABS.map((tab) => (
           <button
             key={tab.set + tab.layer}
@@ -716,25 +855,25 @@ function MorphCard() {
             })}
             tabIndex={tab.layer === 0 ? 0 : -1}
             onClick={() => goRef.current?.(tab.layer)}
-            className="group/tab absolute bottom-[calc(100%-1px)] left-[1.875rem] flex h-8 cursor-pointer items-center rounded-t-[10px] whitespace-nowrap data-[edge=bottom]:top-[calc(100%-1px)] data-[edge=bottom]:bottom-auto data-[edge=bottom]:rounded-t-none data-[edge=bottom]:rounded-b-[10px] data-[edge=bottom]:before:top-0 data-[edge=bottom]:before:-bottom-3 px-3 text-[0.8125rem] font-medium max-sm:px-2.5 max-[359px]:px-1.5 max-[359px]:text-xs text-card-foreground outline-none select-none [-webkit-tap-highlight-color:transparent] will-change-transform before:absolute before:inset-x-0 before:-top-3 before:bottom-0 focus-visible:ring-2 focus-visible:ring-clay/70"
+            className="group/tab absolute bottom-[calc(100%-1px)] start-[1.875rem] flex h-8 cursor-pointer items-center rounded-t-[10px] whitespace-nowrap data-[edge=bottom]:top-[calc(100%-1px)] data-[edge=bottom]:bottom-auto data-[edge=bottom]:rounded-t-none data-[edge=bottom]:rounded-b-[10px] data-[edge=bottom]:before:top-0 data-[edge=bottom]:before:-bottom-3 px-3 text-[0.8125rem] font-medium max-sm:px-2.5 max-[359px]:px-1.5 max-[359px]:text-xs text-card-foreground outline-none select-none [-webkit-tap-highlight-color:transparent] will-change-transform before:absolute before:inset-x-0 before:-top-3 before:bottom-0 focus-visible:ring-2 focus-visible:ring-clay/70"
             style={{ opacity: 0, visibility: "hidden" }}
           >
             <span className="flex items-center gap-1.5 opacity-55 transition-[opacity,transform] duration-150 ease-out group-active/tab:scale-[0.97] group-aria-selected/tab:opacity-100 [@media(hover:hover)]:group-hover/tab:opacity-100">
               {tab.set !== ROOT && (
-                <tab.icon aria-hidden className="size-3.5" strokeWidth={1.75} />
+                <tab.icon aria-hidden className="size-3.5 rtl:-scale-x-100" strokeWidth={1.75} />
               )}
               {tab.set === ROOT && (
                 <span className="font-mono text-[0.625rem] tabular-nums opacity-60 max-sm:hidden">
-                  {String(tab.layer + 1).padStart(2, "0")}
+                  {num(String(tab.layer + 1).padStart(2, "0"), locale)}
                 </span>
               )}
-              {tab.layer === BACK ? (
-                <>
-                  <span className="sr-only">Back to</span>
-                  <span data-back-label>{tab.label}</span>
-                </>
+              {tab.label ? (
+                tr(tab.label, locale)
               ) : (
-                tab.label
+                <>
+                  <span className="sr-only">{tr(ui.backTo, locale)}</span>
+                  {tr(SCENES[origin].label, locale)}
+                </>
               )}
             </span>
           </button>
@@ -743,14 +882,16 @@ function MorphCard() {
 
       <Card
         ref={cardRef}
-        className="relative block gap-0 bg-transparent p-0 ring-0! [--card-spacing:--spacing(6)]"
+        className="relative block gap-0 bg-transparent p-0 ring-0! [--card-spacing:--spacing(6)] max-sm:[--card-spacing:--spacing(5)]"
         style={{ width: SEED, height: SEED, borderRadius: SEED / 2 }}
       >
         <div ref={accentRef} aria-hidden className="absolute top-0 left-0 bg-clay" />
 
         <Layer id="projects">
           <CardHeader>
-            <Label anchorClassName="size-1.5 rounded-[1px]">built, never shipped</Label>
+            <Label anchorClassName="size-1.5 rounded-[1px]">
+              {tr(ui.labels.projects, locale)}
+            </Label>
           </CardHeader>
           <CardContent>
             {/* A bento of the works themselves: each tile is live, and opens its folder. */}
@@ -759,6 +900,7 @@ function MorphCard() {
                 <Tile
                   key={project.id}
                   project={project}
+                  locale={locale}
                   wide={i === 0}
                   onOpen={() => goRef.current?.(layerOf(project.id))}
                 />
@@ -769,22 +911,22 @@ function MorphCard() {
 
         <Layer id="github">
           <CardHeader>
-            <Label anchorClassName="size-1.5 rounded-full">open source</Label>
+            <Label anchorClassName="size-1.5 rounded-full">{tr(ui.labels.github, locale)}</Label>
             <CardTitle className="text-lg">
-              <Link href={github.href}>{github.handle}</Link>
+              <Link href={github.href} mark={false}>
+                {github.handle}
+              </Link>
             </CardTitle>
-            <CardDescription>{github.bio}</CardDescription>
+            <CardDescription>{tr(github.bio, locale)}</CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-5">
-            <Stats items={github.stats} />
+            <Stats items={github.stats} locale={locale} />
             <ul className="flex flex-col gap-2">
               {github.repos.map((repo) => (
                 <li key={repo.name} className="flex items-baseline justify-between gap-4">
-                  <Open brand="github" onOpen={() => goRef.current?.(layerOf(repo.project))}>
-                    {repo.name}
-                  </Open>
+                  <Open onOpen={() => goRef.current?.(layerOf(repo.project))}>{repo.name}</Open>
                   <span className="font-mono text-xs text-muted-foreground tabular-nums">
-                    ★ {repo.stars}
+                    ★ {num(repo.stars, locale)}
                   </span>
                 </li>
               ))}
@@ -802,25 +944,31 @@ function MorphCard() {
                 </svg>
               }
             >
-              channel
+              {tr(ui.labels.youtube, locale)}
             </Label>
             <CardTitle className="text-lg">
-              <Link href={youtube.href}>{youtube.handle}</Link>
+              <Link href={youtube.href} mark={false}>
+                {youtube.handle}
+              </Link>
             </CardTitle>
           </CardHeader>
           <CardContent className="flex flex-col gap-5">
-            <Stats items={youtube.stats} />
+            <Stats items={youtube.stats} locale={locale} />
             <ul className="flex flex-col gap-2">
               {youtube.featured.map((video) => (
-                <li key={video.title} className="flex items-baseline justify-between gap-4">
+                <li key={tr(video.title, "en")} className="flex items-baseline justify-between gap-4">
                   {video.project ? (
-                    <Open brand="youtube" onOpen={() => goRef.current?.(layerOf(video.project))}>
-                      {video.title}
+                    <Open onOpen={() => goRef.current?.(layerOf(video.project!))}>
+                      {tr(video.title, locale)}
                     </Open>
                   ) : (
-                    <Link href={video.href}>{video.title}</Link>
+                    <Link href={video.href} mark={false}>
+                      {tr(video.title, locale)}
+                    </Link>
                   )}
-                  <span className="shrink-0 text-xs text-muted-foreground">{video.meta}</span>
+                  <span className="shrink-0 text-xs text-muted-foreground">
+                    {tr(video.meta, locale)}
+                  </span>
                 </li>
               ))}
             </ul>
@@ -830,18 +978,21 @@ function MorphCard() {
         <Layer id="work">
           <CardHeader>
             <Label anchorClassName="h-0.5 w-4 rounded-full">
-              {work.at(-1)?.period.slice(0, 4)} — now
+              {num(work.at(-1)!.start, locale)} — {tr(ui.now, locale)}
             </Label>
           </CardHeader>
           <CardContent>
             <Timeline
               items={work.map((job) => ({
-                key: job.company,
-                title: job.company,
-                subtitle: job.title,
+                key: tr(job.company, "en"),
+                title: tr(job.company, locale),
+                subtitle: tr(job.title, locale),
                 href: job.href,
                 logo: job.logo,
-                period: job.period,
+                period:
+                  job.end === undefined
+                    ? num(job.start, locale)
+                    : `${num(job.start, locale)} – ${job.end ? num(job.end, locale) : tr(ui.now, locale)}`,
               }))}
             />
           </CardContent>
@@ -849,14 +1000,14 @@ function MorphCard() {
 
         <Layer id="contact">
           <CardHeader>
-            <Label anchorClassName="size-1.5 rounded-[2px]">get in touch</Label>
+            <Label anchorClassName="size-1.5 rounded-[2px]">{tr(ui.labels.contact, locale)}</Label>
           </CardHeader>
           <CardContent>
             <ul className="flex flex-col gap-2">
               {contact.map((item) => (
-                <li key={item.label} className="flex items-baseline justify-between gap-4">
+                <li key={item.href} className="flex items-baseline justify-between gap-4">
                   <span className="shrink-0 font-mono text-xs text-muted-foreground">
-                    {item.label}
+                    {tr(item.label, locale)}
                   </span>
                   <Link href={item.href}>{item.value}</Link>
                 </li>
@@ -868,26 +1019,26 @@ function MorphCard() {
         {projects.map((project) => (
           <Layer key={project.id} id={project.id}>
             <CardHeader>
-              <Label anchorClassName="size-1.5 rounded-[1px]">{project.kind}</Label>
-              <CardTitle className="text-lg">{project.title}</CardTitle>
-              <CardDescription>{project.summary}</CardDescription>
+              <Label anchorClassName="size-1.5 rounded-[1px]">{tr(project.kind, locale)}</Label>
+              <CardTitle className="text-lg">{tr(project.title, locale)}</CardTitle>
+              <CardDescription>{tr(project.summary, locale)}</CardDescription>
             </CardHeader>
             <CardContent className="flex flex-col gap-5">
-              {project.figure && <HairlineFigure name={project.figure} />}
-              <Stats items={project.facts} />
+              {project.figure && <HairlineFigure name={project.figure} locale={locale} />}
+              <Stats items={project.facts} locale={locale} />
               <ul className="flex flex-col gap-2">
                 {project.links.map((link) => (
                   <li key={link.href} className="flex items-baseline justify-between gap-4">
                     <span className="shrink-0 font-mono text-xs text-muted-foreground">
-                      {link.label}
+                      {tr(link.label, locale)}
                     </span>
-                    <Link href={link.href}>{link.value}</Link>
+                    <Link href={link.href}>{tr(link.value, locale)}</Link>
                   </li>
                 ))}
               </ul>
               {project.verdict && (
                 <p className="border-t border-dashed pt-3 font-mono text-[0.6875rem] text-muted-foreground">
-                  verdict: {project.verdict}.
+                  {tr(ui.verdict, locale)}: {tr(project.verdict, locale)}.
                 </p>
               )}
             </CardContent>
@@ -944,13 +1095,13 @@ function Label({
   )
 }
 
-function Stats({ items }: { items: { label: string; value: string }[] }) {
+function Stats({ items, locale }: { items: { label: Text; value: string }[]; locale: Locale }) {
   return (
     <dl className="flex gap-6">
       {items.map((item) => (
-        <div key={item.label} className="flex flex-col-reverse gap-0.5">
-          <dt className="text-xs text-muted-foreground">{item.label}</dt>
-          <dd className="text-base font-medium tabular-nums">{item.value}</dd>
+        <div key={tr(item.label, "en")} className="flex flex-col-reverse gap-0.5">
+          <dt className="text-xs text-muted-foreground">{tr(item.label, locale)}</dt>
+          <dd className="text-base font-medium tabular-nums">{num(item.value, locale)}</dd>
         </div>
       ))}
     </dl>
@@ -999,10 +1150,13 @@ function Timeline({
 
 function Link({
   href,
+  mark = true,
   className,
   children,
 }: {
   href: string
+  /** Show the mark of the site it leads to. Left off where the scene already says which site. */
+  mark?: boolean
   className?: string
   children: React.ReactNode
 }) {
@@ -1017,13 +1171,16 @@ function Link({
         className
       )}
     >
-      <BrandMark brand={brandOf(href)} className="mr-0.5 shrink-0 self-center" />
-      <span className="truncate underline decoration-foreground/25 underline-offset-4 transition-colors duration-150 [@media(hover:hover)]:group-hover/link:decoration-clay">
+      {mark && <BrandMark brand={brandOf(href)} className="me-0.5 shrink-0 self-center" />}
+      <span
+        dir="auto"
+        className="truncate underline decoration-foreground/25 underline-offset-4 transition-colors duration-150 [@media(hover:hover)]:group-hover/link:decoration-clay"
+      >
         {children}
       </span>
       <ArrowUpRight
         aria-hidden
-        className="size-[0.85em] shrink-0 self-center text-muted-foreground transition-[color,translate] duration-150 ease-out [@media(hover:hover)]:group-hover/link:translate-x-px [@media(hover:hover)]:group-hover/link:-translate-y-px [@media(hover:hover)]:group-hover/link:text-clay"
+        className="size-[0.85em] shrink-0 self-center text-muted-foreground transition-[color,translate] duration-150 ease-out rtl:-scale-x-100 [@media(hover:hover)]:group-hover/link:translate-x-px [@media(hover:hover)]:group-hover/link:-translate-y-px [@media(hover:hover)]:group-hover/link:text-clay [@media(hover:hover)]:rtl:group-hover/link:-translate-x-px"
         strokeWidth={2}
       />
     </a>
@@ -1033,10 +1190,12 @@ function Link({
 /** One work in the Projects bento: its figure, live, over its name and the figure's read-out. */
 function Tile({
   project,
+  locale,
   wide,
   onOpen,
 }: {
   project: Project
+  locale: Locale
   wide: boolean
   onOpen: () => void
 }) {
@@ -1045,19 +1204,28 @@ function Tile({
     <li
       onClick={onOpen}
       className={cn(
-        "flex cursor-pointer flex-col overflow-hidden rounded-xl bg-muted/25 ring-1 ring-(--card-edge) transition-[background-color] duration-200 [@media(hover:hover)]:hover:bg-muted/45",
+        "relative flex cursor-pointer flex-col overflow-hidden rounded-xl bg-muted/25 ring-1 ring-(--card-edge) transition-[background-color] duration-200 [@media(hover:hover)]:hover:bg-muted/45",
         wide && "col-span-2"
       )}
     >
       {project.figure && (
-        <HairlineFigure name={project.figure} band={wide ? [46, 258] : [55, 275]} readout={readout} />
+        <HairlineFigure
+          name={project.figure}
+          locale={locale}
+          band={wide ? [46, 258] : [55, 275]}
+          readout={readout}
+        />
       )}
       <div className="flex items-baseline justify-between gap-3 px-3 pt-1 pb-2.5">
-        <Open onOpen={onOpen}>{project.label}</Open>
+        <Open onOpen={onOpen}>{tr(project.label, locale)}</Open>
         <span
           ref={readout}
           aria-live="polite"
-          className="truncate font-mono text-[0.625rem] text-muted-foreground tabular-nums"
+          className={cn(
+            "truncate font-mono text-[0.625rem] text-muted-foreground tabular-nums",
+            // A half-width tile on a phone has no room beside the name; the corner is free.
+            !wide && "max-sm:absolute max-sm:end-2.5 max-sm:top-2"
+          )}
         />
       </div>
     </li>
@@ -1068,32 +1236,180 @@ function Tile({
  * Opens a project's folder on this site. Same underline as a link, but the
  * arrow points along the page instead of out of it: this one stays here.
  */
-function Open({
-  brand = null,
-  onOpen,
-  children,
-}: {
-  /** Where the work lives, shown as that site's mark. */
-  brand?: Brand | null
-  onOpen: () => void
-  children: React.ReactNode
-}) {
+function Open({ onOpen, children }: { onOpen: () => void; children: React.ReactNode }) {
   return (
     <button
       type="button"
       onClick={onOpen}
-      className="group/link inline-flex max-w-full min-w-0 cursor-pointer items-baseline gap-1 rounded-sm text-left outline-none transition-opacity duration-150 focus-visible:ring-2 focus-visible:ring-clay/70 active:opacity-60"
+      className="group/link inline-flex max-w-full min-w-0 cursor-pointer items-baseline gap-1 rounded-sm text-start outline-none transition-opacity duration-150 focus-visible:ring-2 focus-visible:ring-clay/70 active:opacity-60"
     >
-      <BrandMark brand={brand} className="mr-0.5 shrink-0 self-center" />
-      <span className="truncate underline decoration-foreground/25 underline-offset-4 transition-colors duration-150 [@media(hover:hover)]:group-hover/link:decoration-clay">
+      <span
+        dir="auto"
+        className="truncate underline decoration-foreground/25 underline-offset-4 transition-colors duration-150 [@media(hover:hover)]:group-hover/link:decoration-clay"
+      >
         {children}
       </span>
       <ArrowRight
         aria-hidden
-        className="size-[0.85em] shrink-0 self-center text-muted-foreground transition-[color,translate] duration-150 ease-out [@media(hover:hover)]:group-hover/link:translate-x-0.5 [@media(hover:hover)]:group-hover/link:text-clay"
+        className="size-[0.85em] shrink-0 self-center text-muted-foreground transition-[color,translate] duration-150 ease-out rtl:-scale-x-100 [@media(hover:hover)]:group-hover/link:translate-x-0.5 [@media(hover:hover)]:group-hover/link:text-clay [@media(hover:hover)]:rtl:group-hover/link:-translate-x-0.5"
         strokeWidth={2}
       />
     </button>
+  )
+}
+
+const ICON_MORPH = cssSpring(MORPH)
+const GLYPH_ENTER = cssSpring(ENTER)
+
+/** One morph, as a CSS transition on `transform`, for the icons below. */
+function morph(settled: boolean): React.CSSProperties {
+  return settled
+    ? {
+        transition: `transform ${ICON_MORPH.duration}s ${ICON_MORPH.easing}, opacity 0.3s ease-out`,
+      }
+    : {}
+}
+
+/**
+ * Two switches under the card, one for the theme and one for the language.
+ * Each shows where it takes you, and turns into the other as you press it.
+ */
+function Switches({
+  theme,
+  locale,
+  settled,
+  onTheme,
+  onLocale,
+}: {
+  theme: Theme
+  locale: Locale
+  settled: boolean
+  onTheme: () => void
+  onLocale: () => void
+}) {
+  const button =
+    "grid size-8 cursor-pointer place-items-center rounded-[10px] bg-card text-muted-foreground ring-1 ring-(--card-edge) outline-none transition-[color,scale] duration-150 ease-out select-none [-webkit-tap-highlight-color:transparent] focus-visible:ring-2 focus-visible:ring-clay/70 active:scale-[0.94] [@media(hover:hover)]:hover:text-foreground"
+  const other = locale === "fa" ? "en" : "fa"
+  return (
+    <div
+      data-switches
+      className="absolute top-0 left-1/2 flex gap-2 will-change-transform"
+      style={{ opacity: 0, height: SWITCH }}
+    >
+      <button
+        type="button"
+        onClick={onTheme}
+        aria-label={tr(theme === "dark" ? ui.theme.toLight : ui.theme.toDark, locale)}
+        className={button}
+      >
+        <ThemeIcon moon={theme === "light"} settled={settled} />
+      </button>
+      <button
+        type="button"
+        onClick={onLocale}
+        lang={other}
+        aria-label={tr(ui.language, locale)}
+        className={button}
+      >
+        <span aria-hidden className="grid">
+          <Glyph shown={locale === "en"} settled={settled} className="font-sans text-[0.8125rem] leading-none">
+            فا
+          </Glyph>
+          <Glyph shown={locale === "fa"} settled={settled} className="font-mono text-[0.625rem] leading-none tracking-wide">
+            EN
+          </Glyph>
+        </span>
+      </button>
+    </div>
+  )
+}
+
+/**
+ * A sun that becomes a moon: the disc swells, a second disc slides in to
+ * bite the crescent out of it, and the rays turn away and shrink into it.
+ */
+function ThemeIcon({ moon, settled }: { moon: boolean; settled: boolean }) {
+  const transition = morph(settled)
+  const origin = { transformOrigin: "12px 12px" }
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden className="size-4 overflow-visible">
+      <mask id="theme-bite">
+        <rect width="24" height="24" fill="white" />
+        <circle
+          cx="18"
+          cy="6"
+          r="7"
+          fill="black"
+          style={{ ...transition, transform: moon ? "none" : "translate(9px, -9px)" }}
+        />
+      </mask>
+      <circle
+        cx="12"
+        cy="12"
+        r="8"
+        fill="currentColor"
+        mask="url(#theme-bite)"
+        style={{ ...transition, ...origin, transform: moon ? "rotate(-20deg)" : "scale(0.5)" }}
+      />
+      <g
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        style={{
+          ...transition,
+          ...origin,
+          opacity: moon ? 0 : 1,
+          transform: moon ? "rotate(-60deg) scale(0.5)" : "none",
+        }}
+      >
+        {Array.from({ length: 8 }, (_, i) => {
+          const angle = (i * Math.PI) / 4
+          const [x, y] = [Math.cos(angle), Math.sin(angle)]
+          return (
+            <line
+              key={i}
+              x1={12 + x * 7}
+              y1={12 + y * 7}
+              x2={12 + x * 9.5}
+              y2={12 + y * 9.5}
+            />
+          )
+        })}
+      </g>
+    </svg>
+  )
+}
+
+/** One of the language glyphs. They share a cell and trade places the way the card's layers do. */
+function Glyph({
+  shown,
+  settled,
+  className,
+  children,
+}: {
+  shown: boolean
+  settled: boolean
+  className?: string
+  children: React.ReactNode
+}) {
+  const transition = !settled
+    ? undefined
+    : shown
+      ? `opacity ${GLYPH_ENTER.duration}s ${GLYPH_ENTER.easing} ${ENTER_DELAY}s, filter ${GLYPH_ENTER.duration}s ${GLYPH_ENTER.easing} ${ENTER_DELAY}s, transform ${GLYPH_ENTER.duration}s ${GLYPH_ENTER.easing} ${ENTER_DELAY}s`
+      : `opacity ${EXIT.duration}s ease-out, filter ${EXIT.duration}s ease-out, transform ${EXIT.duration}s ease-out`
+  return (
+    <span
+      className={cn("col-start-1 row-start-1 grid place-items-center", className)}
+      style={{
+        transition,
+        opacity: shown ? 1 : 0,
+        filter: shown ? "none" : `blur(${BLUR / 2}px)`,
+        transform: shown ? "none" : `translateY(${SHIFT}px)`,
+      }}
+    >
+      {children}
+    </span>
   )
 }
 

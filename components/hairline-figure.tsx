@@ -2,6 +2,7 @@
 
 import * as React from "react"
 
+import { type Locale, readout as translate } from "@/lib/i18n"
 import { cn } from "@/lib/utils"
 
 type Read = { textContent: string | null }
@@ -58,6 +59,13 @@ function load(name: string) {
   return figure
 }
 
+/** What each figure shows, for screen readers, in Persian. The English comes from the figure. */
+const MEANS_FA: Record<string, string> = {
+  bracket: "هر فروش یک توکن را در توکن خریدار می‌سوزاند: در کل بازار، شانزده توکن در یکی جمع می‌شوند.",
+  vandal: "ستونی از اتاق‌ها را خراب کن تا ویلا از نو حل شود: از پایین فرو می‌ریزد و هر رویه‌ای که باز مانده دیوار می‌گیرد.",
+  tug: "دو جناح هزار جای وایت‌لیست را تقسیم کرده‌اند. دیوار را بکش تا چندتایی بدزدی، و ببین هر جای سمت خودت چطور ارزش از دست می‌دهد.",
+}
+
 /** The figure's palette, taken from the card it sits on. */
 const PALETTE = {
   "--hairline-plate": "var(--card)",
@@ -73,11 +81,13 @@ const PALETTE = {
  */
 function HairlineFigure({
   name,
+  locale,
   band = [55, 275],
   readout,
   className,
 }: {
   name: string
+  locale: Locale
   band?: [number, number]
   /** Where the read-out goes, when not in the figure's corner. */
   readout?: React.RefObject<HTMLElement | null>
@@ -86,6 +96,20 @@ function HairlineFigure({
   const stageRef = React.useRef<HTMLDivElement>(null)
   const ownRef = React.useRef<HTMLSpanElement>(null)
   const readRef = readout ?? ownRef
+  // The figure reads back what it wrote, so it keeps its English; only the page is translated.
+  const raw = React.useRef("")
+  const localeRef = React.useRef(locale)
+  const meansRef = React.useRef("")
+
+  React.useEffect(() => {
+    localeRef.current = locale
+    if (readRef.current && raw.current) readRef.current.textContent = translate(raw.current, locale)
+    if (meansRef.current)
+      stageRef.current?.setAttribute(
+        "aria-label",
+        locale === "fa" ? (MEANS_FA[name] ?? meansRef.current) : meansRef.current
+      )
+  }, [locale, name, readRef])
 
   React.useEffect(() => {
     const stage = stageRef.current
@@ -99,18 +123,23 @@ function HairlineFigure({
       if (cancelled || !HL) return
       HL.inject(document)
       stage.setAttribute("data-hairline", figure.name)
-      stage.setAttribute("aria-label", figure.means)
+      meansRef.current = figure.means
+      stage.setAttribute(
+        "aria-label",
+        localeRef.current === "fa" ? (MEANS_FA[name] ?? figure.means) : figure.means
+      )
       const svg = HL.mk("svg", { viewBox: "0 0 400 320", "aria-hidden": "true" }, stage)
       const read: Read = {
         get textContent() {
-          return out.textContent
+          return raw.current
         },
         set textContent(value) {
-          out.textContent = value ?? ""
+          raw.current = value ?? ""
+          out.textContent = translate(raw.current, localeRef.current)
         },
       }
       handle = figure.mount({ stage, svg, read }, figure.range[1])
-      if (!out.textContent) out.textContent = "rest"
+      if (!raw.current) read.textContent = "rest"
     })
 
     return () => {

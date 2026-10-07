@@ -88,3 +88,29 @@ export class Spring {
     this.impulses = []
   }
 }
+
+/**
+ * The same spring as a CSS transition, for things that live in CSS rather
+ * than in a render loop: `transition: transform ${duration}s ${easing}`.
+ */
+export function cssSpring(config: SpringConfig, samples = 40) {
+  const zeta = Math.min(0.999, Math.max(0.05, 1 - config.bounce))
+  const omega = (2 * Math.PI) / Math.max(config.duration, 1e-4)
+  const impulse: Impulse = {
+    t0: 0,
+    delta: 1,
+    omega,
+    zeta,
+    omegaD: omega * Math.sqrt(1 - zeta * zeta),
+    end: 0,
+  }
+  // Settled to a thousandth: past that a transition only wastes frames.
+  const duration = Math.log(1e3) / (zeta * omega)
+  const points = Array.from({ length: samples + 1 }, (_, i) =>
+    i === samples ? 1 : stepResponse(impulse, (i / samples) * duration)
+  )
+  return {
+    duration,
+    easing: `linear(${points.map((p) => +p.toFixed(4)).join(", ")})`,
+  }
+}

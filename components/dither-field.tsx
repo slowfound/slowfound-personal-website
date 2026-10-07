@@ -33,8 +33,8 @@ const TEAR_SHIFT = 18
 /** How fast the tearing after a pulse dies down, per second. */
 const TEAR_DECAY = 5
 
-/** Phones and touch devices get a plain background. Mirrors the classes on the canvas. */
-const MOBILE = "(max-width: 767.98px), (pointer: coarse)"
+/** How long a theme switch takes to blend, in seconds; the ink is re-read until it is over. */
+const THEME_BLEND = 0.7
 
 let pulses: number[] = []
 
@@ -224,33 +224,39 @@ function DitherField({
     gl.uniform1f(uniform("strength"), strength)
 
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)")
-    const colorScheme = window.matchMedia("(prefers-color-scheme: dark)")
-    const mobile = window.matchMedia(MOBILE)
 
     let disposed = false
     const rings = new Float32Array(MAX_RINGS * 2)
+    /** Until when the theme is still blending, in seconds. */
+    let blendingUntil = -Infinity
 
-    function build() {
-      if (disposed || mobile.matches) return
-      const ratio = Math.min(window.devicePixelRatio || 1, 2)
-      canvas!.width = Math.round(canvas!.clientWidth * ratio)
-      canvas!.height = Math.round(canvas!.clientHeight * ratio)
-
+    function ink() {
       // The ink colour can be in any CSS colour space; painting it resolves it to sRGB.
+      probe!.clearRect(0, 0, 1, 1)
       probe!.fillStyle = getComputedStyle(canvas!).color
       probe!.fillRect(0, 0, 1, 1)
       const [red, green, blue] = probe!.getImageData(0, 0, 1, 1).data
+      gl!.uniform3f(uniforms.ink, red / 255, green / 255, blue / 255)
+    }
+
+    function build() {
+      if (disposed) return
+      const ratio = Math.min(window.devicePixelRatio || 1, 2)
+      canvas!.width = Math.round(canvas!.clientWidth * ratio)
+      canvas!.height = Math.round(canvas!.clientHeight * ratio)
 
       gl!.viewport(0, 0, canvas!.width, canvas!.height)
       gl!.uniform2f(uniforms.size, canvas!.width, canvas!.height)
       // Whole device pixels per cell, so every dot is the same size.
       gl!.uniform1f(uniforms.cell, Math.round(CELL * ratio))
       gl!.uniform1f(uniforms.ratio, ratio)
-      gl!.uniform3f(uniforms.ink, red / 255, green / 255, blue / 255)
+      ink()
       if (reducedMotion.matches) draw(0)
     }
 
     function draw(t: number) {
+      // While the theme blends, the dots blend with it.
+      if (t < blendingUntil) ink()
       pulses = pulses.filter((at) => t - at < PULSE_LIFE)
       rings.fill(0)
       let jolt = 0
@@ -272,34 +278,33 @@ function DitherField({
       gl!.drawArrays(gl!.TRIANGLES, 0, 3)
     }
 
-    // On mobile the canvas is hidden in CSS and nothing is built or drawn.
     let frame = 0
-    function sync() {
-      cancelAnimationFrame(frame)
-      if (mobile.matches) return
-      build()
-      if (reducedMotion.matches) return
+    build()
+    if (!reducedMotion.matches) {
       frame = requestAnimationFrame(function tick(ms) {
         draw(ms / 1000)
         frame = requestAnimationFrame(tick)
       })
     }
 
-    sync()
-
     const resizeObserver = new ResizeObserver(build)
     resizeObserver.observe(canvas)
-    // The dots are drawn in the current ink colour.
-    colorScheme.addEventListener("change", build)
-    mobile.addEventListener("change", sync)
+    // The dots are drawn in the current ink colour, which blends on a theme switch.
+    let settle = 0
+    const themeObserver = new MutationObserver(() => {
+      blendingUntil = performance.now() / 1000 + THEME_BLEND
+      clearTimeout(settle)
+      settle = window.setTimeout(build, THEME_BLEND * 1000)
+    })
+    themeObserver.observe(document.documentElement, { attributeFilter: ["data-theme"] })
 
     return () => {
       disposed = true
       gl.deleteProgram(program)
       cancelAnimationFrame(frame)
+      clearTimeout(settle)
       resizeObserver.disconnect()
-      colorScheme.removeEventListener("change", build)
-      mobile.removeEventListener("change", sync)
+      themeObserver.disconnect()
     }
   }, [strength])
 
@@ -307,7 +312,7 @@ function DitherField({
     <canvas
       ref={ref}
       aria-hidden
-      className={cn("pointer-events-none max-md:hidden pointer-coarse:hidden", className)}
+      className={cn("pointer-events-none", className)}
     />
   )
 }

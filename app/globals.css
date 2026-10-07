@@ -2,13 +2,14 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 
-/* Dark mode follows the system setting; there is no manual override. */
-@custom-variant dark (@media (prefers-color-scheme: dark));
+/* The theme starts from the system setting and can be switched; see PREFERENCES_SCRIPT. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
 @theme inline {
     --font-heading: var(--font-sans);
-    --font-sans: "Anthropic Sans", var(--font-fallback-sans), ui-sans-serif, system-ui, sans-serif;
-    --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+    /* Vazirmatn only covers Persian script, so it can lead both stacks: Latin falls through. */
+    --font-sans: var(--font-persian), "Anthropic Sans", var(--font-fallback-sans), ui-sans-serif, system-ui, sans-serif;
+    --font-mono: var(--font-persian), var(--font-geist-mono), ui-monospace, monospace;
     --color-clay: var(--clay);
     --color-sidebar-ring: var(--sidebar-ring);
     --color-sidebar-border: var(--sidebar-border);
@@ -51,7 +52,7 @@
 }
 
 :root {
-    color-scheme: light dark;
+    color-scheme: light;
     --clay: oklch(0.67 0.13 39);
     --tab-rest: oklch(0.925 0.012 92);
     /* Hairline around the card and its selected tab. Opaque, so it looks the same over any backdrop. */
@@ -90,41 +91,71 @@
     --sidebar-ring: oklch(0.708 0 0);
 }
 
-@media (prefers-color-scheme: dark) {
+:root[data-theme="dark"] {
+    color-scheme: dark;
+    --tab-rest: oklch(0.195 0.004 90);
+    --background: oklch(0.17 0.004 90);
+    --foreground: oklch(0.96 0.008 92);
+    --card: oklch(0.215 0.005 90);
+    --card-foreground: oklch(0.96 0.008 92);
+    --popover: oklch(0.205 0 0);
+    --popover-foreground: oklch(0.985 0 0);
+    --primary: oklch(0.922 0 0);
+    --primary-foreground: oklch(0.205 0 0);
+    --secondary: oklch(0.269 0 0);
+    --secondary-foreground: oklch(0.985 0 0);
+    --muted: oklch(0.269 0 0);
+    --muted-foreground: oklch(0.72 0.012 90);
+    --accent: oklch(0.269 0 0);
+    --accent-foreground: oklch(0.985 0 0);
+    --destructive: oklch(0.704 0.191 22.216);
+    --border: oklch(1 0 0 / 10%);
+    --input: oklch(1 0 0 / 15%);
+    --ring: oklch(0.556 0 0);
+    --chart-1: oklch(0.87 0 0);
+    --chart-2: oklch(0.556 0 0);
+    --chart-3: oklch(0.439 0 0);
+    --chart-4: oklch(0.371 0 0);
+    --chart-5: oklch(0.269 0 0);
+    --sidebar: oklch(0.205 0 0);
+    --sidebar-foreground: oklch(0.985 0 0);
+    --sidebar-primary: oklch(0.488 0.243 264.376);
+    --sidebar-primary-foreground: oklch(0.985 0 0);
+    --sidebar-accent: oklch(0.269 0 0);
+    --sidebar-accent-foreground: oklch(0.985 0 0);
+    --sidebar-border: oklch(1 0 0 / 10%);
+    --sidebar-ring: oklch(0.556 0 0);
+}
+
+/*
+ * The colours the page is painted with, registered so switching themes
+ * blends them instead of cutting. Everything mixed from them follows along.
+ */
+@property --background { syntax: "<color>"; inherits: true; initial-value: transparent; }
+@property --foreground { syntax: "<color>"; inherits: true; initial-value: transparent; }
+@property --card { syntax: "<color>"; inherits: true; initial-value: transparent; }
+@property --card-foreground { syntax: "<color>"; inherits: true; initial-value: transparent; }
+@property --muted { syntax: "<color>"; inherits: true; initial-value: transparent; }
+@property --muted-foreground { syntax: "<color>"; inherits: true; initial-value: transparent; }
+@property --border { syntax: "<color>"; inherits: true; initial-value: transparent; }
+@property --tab-rest { syntax: "<color>"; inherits: true; initial-value: transparent; }
+
+:root {
+    --theme-blend: 0.6s cubic-bezier(0.2, 0, 0, 1);
+    transition:
+        --background var(--theme-blend),
+        --foreground var(--theme-blend),
+        --card var(--theme-blend),
+        --card-foreground var(--theme-blend),
+        --muted var(--theme-blend),
+        --muted-foreground var(--theme-blend),
+        --border var(--theme-blend),
+        --tab-rest var(--theme-blend);
+}
+
+@media (prefers-reduced-motion: reduce) {
     :root {
-        color-scheme: dark;
-        --tab-rest: oklch(0.195 0.004 90);
-        --background: oklch(0.17 0.004 90);
-        --foreground: oklch(0.96 0.008 92);
-        --card: oklch(0.215 0.005 90);
-        --card-foreground: oklch(0.96 0.008 92);
-        --popover: oklch(0.205 0 0);
-        --popover-foreground: oklch(0.985 0 0);
-        --primary: oklch(0.922 0 0);
-        --primary-foreground: oklch(0.205 0 0);
-        --secondary: oklch(0.269 0 0);
-        --secondary-foreground: oklch(0.985 0 0);
-        --muted: oklch(0.269 0 0);
-        --muted-foreground: oklch(0.72 0.012 90);
-        --accent: oklch(0.269 0 0);
-        --accent-foreground: oklch(0.985 0 0);
-        --destructive: oklch(0.704 0.191 22.216);
-        --border: oklch(1 0 0 / 10%);
-        --input: oklch(1 0 0 / 15%);
-        --ring: oklch(0.556 0 0);
-        --chart-1: oklch(0.87 0 0);
-        --chart-2: oklch(0.556 0 0);
-        --chart-3: oklch(0.439 0 0);
-        --chart-4: oklch(0.371 0 0);
-        --chart-5: oklch(0.269 0 0);
-        --sidebar: oklch(0.205 0 0);
-        --sidebar-foreground: oklch(0.985 0 0);
-        --sidebar-primary: oklch(0.488 0.243 264.376);
-        --sidebar-primary-foreground: oklch(0.985 0 0);
-        --sidebar-accent: oklch(0.269 0 0);
-        --sidebar-accent-foreground: oklch(0.985 0 0);
-        --sidebar-border: oklch(1 0 0 / 10%);
-        --sidebar-ring: oklch(0.556 0 0);
+        --theme-blend: 0.2s linear;
     }
 }
 
@@ -140,4 +171,20 @@
     /* The page turns scenes instead of scrolling; keep pull-to-refresh out of it. */
     overscroll-behavior: none;
     }
+}
+/*
+ * While the theme blends, everything takes its colour straight from the
+ * blending tokens. Its own colour transitions would restart on every frame
+ * of the blend and lag behind it. The switches keep their morph.
+ */
+:root[data-blending] :not([data-switches], [data-switches] *) {
+    transition: none !important;
+}
+
+/*
+ * Persian has no monospace of its own: in the mono labels its words are set
+ * in Vazirmatn but spaced with Geist Mono's wide space. Close the gaps.
+ */
+:root:lang(fa) .font-mono {
+    word-spacing: -0.3em;
 }
